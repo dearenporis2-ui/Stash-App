@@ -525,7 +525,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import { getFirestore, collection, addDoc, getDocs, query, orderBy, doc, setDoc, getDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const fbApp = initializeApp({apiKey:"AIzaSyC8UW52mL08bGoNw8TsrhOe9OvPy4VB6Do",authDomain:"businessboost-ai.firebaseapp.com",projectId:"businessboost-ai",storageBucket:"businessboost-ai.firebasestorage.app",messagingSenderId:"92085558775",appId:"1:92085558775:web:5648dad6377fc56114a2f2"});
@@ -876,7 +876,7 @@ window.handleEmail=async function(){
   }catch(e){err.textContent=e.code+' | '+e.message;err.style.display='block';}
 };
 window.handleGoogle=async function(){
-  try{await signInWithPopup(auth,gp);}
+  try{await signInWithRedirect(auth,gp);}
   catch(e){const err=document.getElementById('auth-error');err.textContent=e.message;err.style.display='block';}
 };
 window.doSignOut=async function(){await signOut(auth);};
