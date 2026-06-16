@@ -1,1233 +1,557 @@
-// ─────────────────────────────────────────────
-// app.js — Stash main application logic
-// Firebase auth, Firestore data, all UI interactions
-// ─────────────────────────────────────────────
-
-import { auth, db } from './firebase.js';
-import { openUploadWidget } from './cloudinary.js';
-import {
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
-  signOut,
-  onAuthStateChanged
-} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-import {
-  doc, getDoc, setDoc, updateDoc, addDoc, deleteDoc,
-  collection, query, where, orderBy, limit,
-  onSnapshot, getDocs, serverTimestamp, increment
-} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-import {
-  getFunctions, httpsCallable
-} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-functions.js";
-
-const functions = getFunctions();
-
-// ═══════════════════════════════════════════
-// STATE
-// ═══════════════════════════════════════════
-let currentUser = null;
-let currentUserData = null;
-let currentScreen = 'dashboard';
-let marketFilter = 'all';
-let marketListings = [];
-let currentSheetListing = null;
-let unsubscribeListeners = [];
-
-// ═══════════════════════════════════════════
-// AUTH
-// ═══════════════════════════════════════════
-onAuthStateChanged(auth, async (user) => {
-  if (user) {
-    currentUser = user;
-    await loadUserData(user.uid);
-    showApp();
-    initApp();
-  } else {
-    currentUser = null;
-    currentUserData = null;
-    showAuth();
-  }
-});
-
-async function loadUserData(uid) {
-  const snap = await getDoc(doc(db, 'users', uid));
-  if (snap.exists()) {
-    currentUserData = snap.data();
-  }
-  // Listen for real-time user data updates (balance, locked status, rep)
-  const unsub = onSnapshot(doc(db, 'users', uid), (snap) => {
-    if (snap.exists()) {
-      currentUserData = snap.data();
-      updateUserUI();
-    }
-  });
-  unsubscribeListeners.push(unsub);
-}
-
-async function handleRegister() {
-  const username = document.getElementById('regUsername').value.trim().toLowerCase().replace('@','');
-  const email = document.getElementById('regEmail').value.trim();
-  const password = document.getElementById('regPassword').value;
-
-  if (!username || !email || !password) return showToast('Please fill in all fields', 'error');
-  if (username.length < 3) return showToast('Username must be at least 3 characters', 'error');
-
-  try {
-    // Check username taken
-    const usernameSnap = await getDocs(query(collection(db, 'users'), where('username', '==', username)));
-    if (!usernameSnap.empty) return showToast('Username already taken', 'error');
-
-    const cred = await createUserWithEmailAndPassword(auth, email, password);
-    await setDoc(doc(db, 'users', cred.user.uid), {
-      uid: cred.user.uid,
-      username,
-      email,
-      displayName: username,
-      bio: '',
-      avatarUrl: '',
-      goldBlocks: 0,
-      traderRep: 0,
-      portfolioValue: 0,
-      accountLocked: false,
-      pendingDebt: 0,
-      isAdmin: false,
-      createdAt: serverTimestamp()
-    });
-    showToast('Welcome to Stash!', 'success');
-  } catch (err) {
-    showToast(err.message, 'error');
-  }
-}
-
-async function handleLogin() {
-  const email = document.getElementById('loginEmail').value.trim();
-  const password = document.getElementById('loginPassword').value;
-  if (!email || !password) return showToast('Please fill in all fields', 'error');
-  try {
-    await signInWithEmailAndPassword(auth, email, password);
-    showToast('Welcome back!', 'success');
-  } catch (err) {
-    showToast('Invalid email or password', 'error');
-  }
-}
-
-async function handleLogout() {
-  unsubscribeListeners.forEach(u => u());
-  unsubscribeListeners = [];
-  await signOut(auth);
-}
-
-function showApp() {
-  document.getElementById('authWrap').style.display = 'none';
-  document.getElementById('appWrap').style.display = 'block';
-}
-
-function showAuth() {
-  document.getElementById('authWrap').style.display = 'flex';
-  document.getElementById('appWrap').style.display = 'none';
-}
-
-function showLogin() {
-  document.getElementById('loginCard').style.display = 'block';
-  document.getElementById('registerCard').style.display = 'none';
-}
-
-function showRegister() {
-  document.getElementById('loginCard').style.display = 'none';
-  document.getElementById('registerCard').style.display = 'block';
-}
-
-// ═══════════════════════════════════════════
-// APP INIT
-// ═══════════════════════════════════════════
-function initApp() {
-  setupSidebarNav();
-  setupMobileNav();
-  updateUserUI();
-  loadDashboard();
-  loadMarketplace();
-  loadLeaderboard();
-  startCountdown();
-}
-
-function updateUserUI() {
-  if (!currentUserData) return;
-  const initials = (currentUserData.displayName || currentUserData.username || 'U').substring(0,2).toUpperCase();
-  const gbDisplay = `${Number(currentUserData.goldBlocks || 0).toLocaleString()} GB`;
-
-  // Avatars
-  ['sidebarAvatar','topbarAvatar','mobileAvatar'].forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    if (currentUserData.avatarUrl) {
-      el.innerHTML = `<img src="${currentUserData.avatarUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
-    } else {
-      el.textContent = initials;
-    }
-  });
-
-  // Names
-  const nameEl = document.getElementById('sidebarName');
-  const handleEl = document.getElementById('sidebarHandle');
-  if (nameEl) nameEl.textContent = currentUserData.displayName || currentUserData.username;
-  if (handleEl) handleEl.textContent = '@' + currentUserData.username;
-
-  // GB Balances
-  ['sidebarGBBalance','topbarGBBalance','mobileGBBalance','dashGBBalance'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = gbDisplay;
-  });
-
-  // Dashboard stats
-  const repEl = document.getElementById('dashTraderRep');
-  if (repEl) repEl.textContent = currentUserData.traderRep || 0;
-
-  // Account locked banner
-  const banner = document.getElementById('lockedBanner');
-  if (banner) banner.style.display = currentUserData.accountLocked ? 'flex' : 'none';
-
-  // Admin nav
-  if (currentUserData.isAdmin) {
-    document.querySelectorAll('.admin-only').forEach(el => el.style.display = 'flex');
-  }
-
-  // Portfolio screen
-  updatePortfolioUI();
-}
-
-function updatePortfolioUI() {
-  if (!currentUserData) return;
-  const initials = (currentUserData.displayName || currentUserData.username || 'U').substring(0,2).toUpperCase();
-  const portAvatar = document.getElementById('portAvatar');
-  if (portAvatar) {
-    if (currentUserData.avatarUrl) {
-      portAvatar.innerHTML = `<img src="${currentUserData.avatarUrl}" style="width:100%;height:100%;object-fit:cover">`;
-    } else {
-      portAvatar.textContent = initials;
-    }
-  }
-  setText('portName', currentUserData.displayName || currentUserData.username);
-  setText('portHandle', '@' + currentUserData.username + ' · stash.app/u/' + currentUserData.username);
-  setText('portBio', currentUserData.bio || 'Add a bio in your profile settings.');
-  setText('portTraderRep', currentUserData.traderRep || 0);
-  setText('portStatRep', currentUserData.traderRep || 0);
-  setText('portStatGB', (currentUserData.goldBlocks || 0) + ' GB');
-}
-
-function setText(id, val) {
-  const el = document.getElementById(id);
-  if (el) el.textContent = val;
-}
-
-// ═══════════════════════════════════════════
-// SCREEN SWITCHING
-// ═══════════════════════════════════════════
-const topbarTitles = {
-  dashboard: 'My Stash',
-  marketplace: 'Marketplace',
-  shop: '✦ Exotic Shop',
-  leaderboard: '🏆 Leaderboard',
-  portfolio: 'Public Profile',
-  trades: 'My Trades',
-  admin: '🛡 Admin Panel'
-};
-
-function switchScreen(id) {
-  if (id === currentScreen) return;
-  const leaving = document.getElementById('screen-' + currentScreen);
-  const entering = document.getElementById('screen-' + id);
-  if (!entering) return;
-
-  leaving.classList.add('leaving');
-  setTimeout(() => {
-    leaving.classList.remove('leaving', 'active');
-    entering.scrollTop = 0;
-    entering.classList.add('active');
-    currentScreen = id;
-
-    // Lazy load screen data
-    if (id === 'marketplace') loadMarketplace();
-    if (id === 'leaderboard') loadLeaderboard();
-    if (id === 'trades') loadTrades();
-    if (id === 'portfolio') loadPortfolioListings();
-    if (id === 'admin' && currentUserData?.isAdmin) loadAdminData();
-  }, 220);
-
-  document.querySelectorAll('.snav').forEach(n => n.classList.toggle('active', n.dataset.screen === id));
-  document.querySelectorAll('.bottom-nav .nav-item[data-screen]').forEach(n => n.classList.toggle('active', n.dataset.screen === id));
-  const titleEl = document.getElementById('topbarTitle');
-  if (titleEl) titleEl.textContent = topbarTitles[id] || id;
-}
-
-function setupSidebarNav() {
-  document.querySelectorAll('.snav[data-screen]').forEach(el => {
-    el.addEventListener('click', () => switchScreen(el.dataset.screen));
-  });
-}
-
-function setupMobileNav() {
-  document.querySelectorAll('.bottom-nav .nav-item[data-screen]').forEach(el => {
-    el.addEventListener('click', () => switchScreen(el.dataset.screen));
-  });
-}
-
-// ═══════════════════════════════════════════
-// DASHBOARD
-// ═══════════════════════════════════════════
-async function loadDashboard() {
-  if (!currentUser) return;
-
-  const q = query(
-    collection(db, 'listings'),
-    where('sellerId', '==', currentUser.uid),
-    where('status', '==', 'active'),
-    orderBy('createdAt', 'desc')
-  );
-
-  const unsub = onSnapshot(q, (snap) => {
-    const listings = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    renderDashboard(listings);
-  });
-  unsubscribeListeners.push(unsub);
-}
-
-function renderDashboard(listings) {
-  const pinned = listings.filter(l => l.pinned);
-  const all = listings;
-
-  // Portfolio value
-  const total = listings.reduce((sum, l) => sum + (l.priceSCR || 0), 0);
-  const nwEl = document.getElementById('nwValue');
-  if (nwEl) animateCount(nwEl, total);
-
-  const trendEl = document.getElementById('nwTrend');
-  if (trendEl) trendEl.textContent = `${listings.length} item${listings.length !== 1 ? 's' : ''} in your stash`;
-
-  setText('dashTotalItems', listings.length);
-
-  // Update Firestore portfolio value
-  if (currentUser) {
-    updateDoc(doc(db, 'users', currentUser.uid), { portfolioValue: total }).catch(() => {});
-  }
-
-  // Portfolio screen stats
-  setText('portStatItems', listings.length);
-  setText('portStatValue', 'SCR ' + total.toLocaleString());
-  setText('portValue', 'SCR ' + total.toLocaleString());
-  setText('portItemCount', listings.length + ' items');
-  setText('pubCount', listings.length + ' Items');
-  setText('myListingsCount', listings.length + ' Items');
-
-  // Pinned grails
-  setText('pinnedCount', pinned.length + ' Pinned');
-  const pinnedGrid = document.getElementById('pinnedGrid');
-  if (pinnedGrid) {
-    if (pinned.length === 0) {
-      pinnedGrid.innerHTML = `<div class="empty-state" style="grid-column:span 3;padding:40px"><div class="empty-icon">📌</div><div class="empty-title">No Grails Pinned Yet</div><div class="empty-sub">Pin your most prized items to the Top Shelf when listing them.</div></div>`;
-    } else {
-      pinnedGrid.innerHTML = pinned.slice(0,3).map((l, i) => renderTopShelfCard(l, i === 0)).join('');
-    }
-  }
-
-  // My listings grid
-  const grid = document.getElementById('myListingsGrid');
-  if (grid) {
-    if (all.length === 0) {
-      grid.innerHTML = `<div class="empty-state" style="grid-column:span 4;padding:40px"><div class="empty-icon">📦</div><div class="empty-title">Your Stash is Empty</div><div class="empty-sub">Start listing your items to build your collection portfolio.</div><button class="modal-btn" style="width:auto;padding:14px 28px;margin-top:16px" onclick="openListingModal()">List Your First Item</button></div>`;
-    } else {
-      grid.innerHTML = all.map(l => renderClosetCard(l)).join('');
-    }
-  }
-
-  // Portfolio grid
-  renderPortfolioGrid(all);
-}
-
-function renderTopShelfCard(l, featured = false) {
-  const frameClass = getFrameClass(l.frame);
-  const imgContent = l.imageUrl
-    ? `<img src="${l.imageUrl}" style="width:100%;height:100%;object-fit:cover">`
-    : getCategoryEmoji(l.category);
-  return `
-    <div class="glass-card ${frameClass}${featured ? '' : ''}" style="${featured ? 'grid-column:span 1' : ''}">
-      <div class="quick-edit-btn" onclick="deleteListing('${l.id}')"><i class="ti ti-trash"></i></div>
-      ${getFrameBadge(l.frame)}
-      <div class="item-img tall">${imgContent}</div>
-      <div class="item-name">${escHtml(l.name)}</div>
-      <div class="item-sub">${escHtml(l.description || '')}</div>
-      <div class="item-value">SCR ${Number(l.priceSCR || 0).toLocaleString()}</div>
-    </div>`;
-}
-
-function renderClosetCard(l) {
-  const imgContent = l.imageUrl
-    ? `<img src="${l.imageUrl}" style="width:100%;height:100%;object-fit:cover">`
-    : getCategoryEmoji(l.category);
-  const intentTag = l.intent ? `<div class="intent-tag tag-${l.intent}" style="margin-top:6px">${getIntentLabel(l.intent)}</div>` : '';
-  return `
-    <div class="closet-card">
-      <div class="closet-img">${imgContent}</div>
-      <div class="closet-name">${escHtml(l.name)}</div>
-      <div class="closet-sub">${escHtml(l.category || '')}</div>
-      <div class="closet-value">SCR ${Number(l.priceSCR || 0).toLocaleString()}</div>
-      ${intentTag}
-    </div>`;
-}
-
-function renderPortfolioGrid(listings) {
-  const grid = document.getElementById('portfolioGrid');
-  if (!grid) return;
-  if (listings.length === 0) {
-    grid.innerHTML = `<div class="empty-state" style="grid-column:span 4"><div class="empty-icon">📦</div><div class="empty-title">No Public Listings</div></div>`;
-    return;
-  }
-  grid.innerHTML = listings.map(l => {
-    const frameClass = l.frame && l.frame !== 'default' ? `${l.frame}-frame` : '';
-    const imgContent = l.imageUrl ? `<img src="${l.imageUrl}" style="width:100%;height:100%;object-fit:cover">` : getCategoryEmoji(l.category);
-    const intentTag = `<div class="intent-tag tag-${l.intent || 'trade'}">${getIntentLabel(l.intent)}</div>`;
-    const btn = l.intent === 'grail'
-      ? `<button class="inquire-btn view-only">View</button>`
-      : `<button class="inquire-btn" onclick="openSheet('${l.id}')">Inquire</button>`;
-    return `
-      <div class="p-card ${frameClass}" data-intent="${l.intent || 'trade'}">
-        ${getFrameBadge(l.frame)}
-        <div class="p-img">${imgContent}</div>
-        <div class="item-name">${escHtml(l.name)}</div>
-        <div class="item-sub">${escHtml(l.category || '')}</div>
-        <div class="p-footer">
-          <div><div class="p-value">SCR ${Number(l.priceSCR || 0).toLocaleString()}</div>${intentTag}</div>
-          ${btn}
-        </div>
-      </div>`;
-  }).join('');
-}
-
-// ═══════════════════════════════════════════
-// MARKETPLACE
-// ═══════════════════════════════════════════
-async function loadMarketplace() {
-  const q = query(
-    collection(db, 'listings'),
-    where('status', '==', 'active'),
-    orderBy('createdAt', 'desc'),
-    limit(50)
-  );
-
-  const unsub = onSnapshot(q, (snap) => {
-    marketListings = snap.docs
-      .map(d => ({ id: d.id, ...d.data() }))
-      .filter(l => l.sellerId !== currentUser?.uid); // exclude own listings
-    renderMarketplace();
-  });
-  unsubscribeListeners.push(unsub);
-}
-
-function renderMarketplace() {
-  const search = (document.getElementById('marketSearch')?.value || '').toLowerCase();
-  let filtered = marketListings;
-
-  if (marketFilter !== 'all') {
-    filtered = filtered.filter(l => l.category === marketFilter);
-  }
-  if (search) {
-    filtered = filtered.filter(l =>
-      l.name?.toLowerCase().includes(search) ||
-      l.category?.toLowerCase().includes(search) ||
-      l.description?.toLowerCase().includes(search)
-    );
-  }
-
-  setText('marketCount', filtered.length + ' Listings');
-
-  const grid = document.getElementById('marketplaceGrid');
-  if (!grid) return;
-
-  if (filtered.length === 0) {
-    grid.innerHTML = `<div class="empty-state" style="grid-column:span 4"><div class="empty-icon">🔍</div><div class="empty-title">No Listings Found</div><div class="empty-sub">Try adjusting your search or filters.</div></div>`;
-    return;
-  }
-
-  grid.innerHTML = filtered.map(l => {
-    const imgContent = l.imageUrl
-      ? `<img src="${l.imageUrl}" style="width:100%;height:100%;object-fit:cover">`
-      : getCategoryEmoji(l.category);
-    const statusTag = l.status === 'reserved'
-      ? `<div class="intent-tag tag-reserved">Reserved</div>`
-      : `<div class="intent-tag tag-${l.intent || 'trade'}">${getIntentLabel(l.intent)}</div>`;
-    return `
-      <div class="listing-card">
-        <div class="listing-img">${imgContent}</div>
-        <div class="listing-name">${escHtml(l.name)}</div>
-        <div class="listing-seller">by @${escHtml(l.sellerUsername || 'unknown')}</div>
-        <div class="listing-price">SCR ${Number(l.priceSCR || 0).toLocaleString()}</div>
-        ${statusTag}
-        <div class="listing-footer" style="margin-top:10px">
-          <button class="reserve-btn" onclick="openSheet('${l.id}')" ${l.status === 'reserved' ? 'disabled' : ''}>
-            ${l.status === 'reserved' ? 'Reserved' : 'Inquire / Reserve'}
-          </button>
-        </div>
-      </div>`;
-  }).join('');
-}
-
-function setMarketFilter(el, filter) {
-  document.querySelectorAll('#marketFilterRow .filter-chip').forEach(c => c.classList.remove('active'));
-  el.classList.add('active');
-  marketFilter = filter;
-  renderMarketplace();
-}
-
-function filterMarketplace() {
-  renderMarketplace();
-}
-
-// ═══════════════════════════════════════════
-// LEADERBOARD
-// ═══════════════════════════════════════════
-async function loadLeaderboard() {
-  const q = query(
-    collection(db, 'users'),
-    orderBy('portfolioValue', 'desc'),
-    limit(10)
-  );
-  const snap = await getDocs(q);
-  const users = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-  renderLeaderboard(users);
-}
-
-function renderLeaderboard(users) {
-  const podium = document.getElementById('leaderboardPodium');
-  const list = document.getElementById('leaderboardList');
-  if (!podium || !list) return;
-
-  if (users.length === 0) {
-    podium.innerHTML = '';
-    list.innerHTML = `<div class="empty-state"><div class="empty-icon">🏆</div><div class="empty-title">No data yet</div></div>`;
-    return;
-  }
-
-  const top3 = users.slice(0, 3);
-  const rest = users.slice(3);
-  const medals = ['🥇','🥈','🥉'];
-  const podiumOrder = top3.length >= 2 ? [top3[1], top3[0], top3[2]].filter(Boolean) : top3;
-  const podiumClasses = top3.length >= 2 ? ['second','first','third'] : ['first'];
-
-  podium.innerHTML = podiumOrder.map((u, i) => {
-    const initials = (u.displayName || u.username || '?').substring(0,2).toUpperCase();
-    const rank = top3.indexOf(u);
-    return `
-      <div class="podium-card ${podiumClasses[i]}">
-        <div class="podium-rank">${medals[rank] || ''}</div>
-        <div class="podium-avatar" style="background:linear-gradient(135deg,var(--gold),var(--gold-light))">
-          ${u.avatarUrl ? `<img src="${u.avatarUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">` : initials}
-        </div>
-        <div class="podium-name">${escHtml(u.displayName || u.username)}</div>
-        <div class="podium-handle">@${escHtml(u.username)}</div>
-        <div class="podium-value">SCR ${Number(u.portfolioValue || 0).toLocaleString()}</div>
-        <div style="font-size:12px;color:var(--text-muted);margin-top:4px">Rep: ${u.traderRep || 0}</div>
-      </div>`;
-  }).join('');
-
-  list.innerHTML = rest.map((u, i) => {
-    const initials = (u.displayName || u.username || '?').substring(0,2).toUpperCase();
-    const isMe = u.id === currentUser?.uid;
-    return `
-      <div class="lb-row" style="${isMe ? 'border-color:rgba(212,160,23,0.4);background:rgba(212,160,23,0.06)' : ''}">
-        <div class="lb-rank" style="${isMe ? 'color:var(--gold)' : ''}">${i + 4}</div>
-        <div class="lb-avatar" style="background:linear-gradient(135deg,var(--gold),var(--gold-light))">
-          ${u.avatarUrl ? `<img src="${u.avatarUrl}" style="width:100%;height:100%;object-fit:cover">` : initials}
-        </div>
-        <div class="lb-info">
-          <div class="lb-name">${escHtml(u.displayName || u.username)}${isMe ? ' <span style="font-size:10px;color:var(--gold);font-weight:700">· You</span>' : ''}</div>
-          <div class="lb-handle">@${escHtml(u.username)}</div>
-        </div>
-        <div style="text-align:right">
-          <div class="lb-value">SCR ${Number(u.portfolioValue || 0).toLocaleString()}</div>
-          <div class="lb-change">Rep: ${u.traderRep || 0}</div>
-        </div>
-      </div>`;
-  }).join('');
-}
-
-// ═══════════════════════════════════════════
-// PORTFOLIO FILTERS
-// ═══════════════════════════════════════════
-function setPubFilter(el, intent) {
-  document.querySelectorAll('#screen-portfolio .filter-chip').forEach(c => c.classList.remove('active'));
-  el.classList.add('active');
-  const cards = document.querySelectorAll('#portfolioGrid .p-card');
-  let visible = 0;
-  cards.forEach(card => {
-    const show = intent === 'all' || card.dataset.intent === intent;
-    card.style.display = show ? '' : 'none';
-    if (show) visible++;
-  });
-  setText('pubCount', visible + ' Items');
-}
-
-async function loadPortfolioListings() {
-  if (!currentUser) return;
-  const q = query(collection(db, 'listings'), where('sellerId', '==', currentUser.uid), where('status', '==', 'active'));
-  const snap = await getDocs(q);
-  const listings = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-  renderPortfolioGrid(listings);
-  setText('portStatItems', listings.length);
-  const total = listings.reduce((s, l) => s + (l.priceSCR || 0), 0);
-  setText('portStatValue', 'SCR ' + total.toLocaleString());
-}
-
-// ═══════════════════════════════════════════
-// LISTING MODAL
-// ═══════════════════════════════════════════
-const specFields = {
-  Watches: [
-    { id: 'specMovement', label: 'Movement Type', placeholder: 'e.g. Automatic, Quartz' },
-    { id: 'specCaseSize', label: 'Case Size (mm)', placeholder: 'e.g. 40mm' },
-    { id: 'specDial', label: 'Dial Color', placeholder: 'e.g. Black, Blue' }
-  ],
-  Sneakers: [
-    { id: 'specSize', label: 'Size', placeholder: 'e.g. US 10' },
-    { id: 'specCondition', label: 'Condition', placeholder: 'e.g. DS, VNDS, Worn' }
-  ],
-  Tech: [
-    { id: 'specModel', label: 'Model / Spec', placeholder: 'e.g. M3 Max, 64GB' },
-    { id: 'specCondition', label: 'Condition', placeholder: 'e.g. New, Like New' }
-  ],
-  Cars: [
-    { id: 'specYear', label: 'Year', placeholder: 'e.g. 2021' },
-    { id: 'specMileage', label: 'Mileage', placeholder: 'e.g. 15,000 km' }
-  ],
-  'Parts Bin': [
-    { id: 'specPartType', label: 'Part Type', placeholder: 'e.g. Watch strap, Mod chip' },
-    { id: 'specCompatibility', label: 'Compatibility', placeholder: 'e.g. Rolex 20mm' }
-  ]
-};
-
-function updateSpecFields() {
-  const cat = document.getElementById('listingCategory').value;
-  const wrap = document.getElementById('specFieldsWrap');
-  const fields = specFields[cat];
-  if (!fields || !wrap) { if (wrap) wrap.innerHTML = ''; return; }
-  wrap.innerHTML = `
-    <div style="grid-column:span 2;font-size:11px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">
-      ${cat} Specs
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stash</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css" />
+  <!-- Cloudinary Upload Widget -->
+  <script src="https://upload-widget.cloudinary.com/global/all.js" type="text/javascript"></script>
+  <!-- QR Code Generator -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <!-- QR Code Scanner -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════
+     AUTH SCREENS (shown before login)
+═══════════════════════════════════════ -->
+<div id="authWrap" class="auth-wrap">
+  <!-- LOGIN -->
+  <div id="loginCard" class="auth-card">
+    <div class="auth-logo">ST<span>A</span>SH</div>
+    <div class="auth-subtitle">The premium collector platform.</div>
+    <div class="modal-group">
+      <div class="modal-label">Email</div>
+      <input class="modal-input" id="loginEmail" type="email" placeholder="your@email.com" />
     </div>
-    ${fields.map(f => `
-      <div class="modal-group">
-        <div class="modal-label">${f.label}</div>
-        <input class="modal-input" id="${f.id}" type="text" placeholder="${f.placeholder}" />
+    <div class="modal-group">
+      <div class="modal-label">Password</div>
+      <input class="modal-input" id="loginPassword" type="password" placeholder="••••••••" />
+    </div>
+    <button class="modal-btn" onclick="handleLogin()">Sign In</button>
+    <div class="auth-switch">Don't have an account? <a onclick="showRegister()">Create one</a></div>
+  </div>
+
+  <!-- REGISTER -->
+  <div id="registerCard" class="auth-card" style="display:none">
+    <div class="auth-logo">ST<span>A</span>SH</div>
+    <div class="auth-subtitle">Join the community. Claim your username.</div>
+    <div class="modal-group">
+      <div class="modal-label">Username</div>
+      <input class="modal-input" id="regUsername" type="text" placeholder="@yourhandle" />
+    </div>
+    <div class="modal-group">
+      <div class="modal-label">Email</div>
+      <input class="modal-input" id="regEmail" type="email" placeholder="your@email.com" />
+    </div>
+    <div class="modal-group">
+      <div class="modal-label">Password</div>
+      <input class="modal-input" id="regPassword" type="password" placeholder="••••••••" />
+    </div>
+    <button class="modal-btn" onclick="handleRegister()">Create Account</button>
+    <div class="auth-switch">Already have an account? <a onclick="showLogin()">Sign in</a></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════
+     MAIN APP (shown after login)
+═══════════════════════════════════════ -->
+<div id="appWrap" style="display:none">
+
+  <!-- MOBILE TOP BAR -->
+  <div class="mobile-topbar">
+    <div class="mobile-logo">ST<span>A</span>SH</div>
+    <div class="mobile-right">
+      <div class="wallet-chip" style="padding:7px 12px;font-size:12px;">
+        <span class="gb-icon">🟨</span><span id="mobileGBBalance">0 GB</span>
       </div>
-    `).join('')}`;
-}
+      <div class="avatar" id="mobileAvatar" style="width:34px;height:34px;font-size:12px;"></div>
+    </div>
+  </div>
 
-function openListingModal() {
-  document.getElementById('listingModal').classList.add('open');
-}
+  <div class="app-layout">
 
-function closeListingModal() {
-  document.getElementById('listingModal').classList.remove('open');
-  // Reset form
-  ['listingName','listingPrice','listingDesc','listingImageUrl'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.value = '';
-  });
-  document.getElementById('listingCategory').value = '';
-  document.getElementById('listingIntent').value = 'trade';
-  document.getElementById('listingFrame').value = 'default';
-  document.getElementById('listingPinned').checked = false;
-  document.getElementById('specFieldsWrap').innerHTML = '';
-  const preview = document.getElementById('uploadPreview');
-  if (preview) preview.innerHTML = `<i class="ti ti-photo-up" style="font-size:32px;color:var(--text-muted);margin-bottom:8px"></i><div style="font-size:13px;color:var(--text-muted)">Click to upload photo</div>`;
-}
+    <!-- ═══ SIDEBAR ═══ -->
+    <aside class="sidebar">
+      <div class="sidebar-logo">ST<span>A</span>SH</div>
+      <div class="snav active" data-screen="dashboard"><i class="ti ti-layout-grid"></i>My Stash</div>
+      <div class="snav" data-screen="marketplace"><i class="ti ti-world"></i>Marketplace</div>
+      <div class="snav" data-screen="shop"><i class="ti ti-shopping-bag"></i>Exotic Shop</div>
+      <div class="snav" data-screen="leaderboard"><i class="ti ti-trophy"></i>Leaderboard</div>
+      <div class="snav" data-screen="portfolio"><i class="ti ti-user"></i>Public Profile</div>
+      <div class="snav" data-screen="trades"><i class="ti ti-arrows-exchange"></i>My Trades</div>
+      <div class="snav admin-only" data-screen="admin" style="display:none"><i class="ti ti-shield"></i>Admin Panel</div>
+      <button class="sidebar-add-btn" onclick="openListingModal()"><i class="ti ti-plus"></i>List an Item</button>
+      <div class="sidebar-bottom">
+        <div class="sidebar-user" onclick="switchScreen('portfolio')">
+          <div class="avatar" id="sidebarAvatar"></div>
+          <div>
+            <div class="sidebar-user-name" id="sidebarName">Loading...</div>
+            <div class="sidebar-user-handle" id="sidebarHandle">@...</div>
+          </div>
+        </div>
+        <div class="wallet-chip" style="width:100%;margin-top:10px;justify-content:center;">
+          <span class="gb-icon">🟨</span>
+          <span id="sidebarGBBalance">0 GB</span>
+        </div>
+        <button class="modal-btn-ghost" style="margin-top:10px;font-size:12px;padding:10px" onclick="handleLogout()">
+          <i class="ti ti-logout" style="margin-right:6px"></i>Sign Out
+        </button>
+      </div>
+    </aside>
 
-function triggerUpload() {
-  openUploadWidget((url) => {
-    document.getElementById('listingImageUrl').value = url;
-    const preview = document.getElementById('uploadPreview');
-    if (preview) preview.innerHTML = `<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:12px">`;
-  });
-}
+    <div class="main-area">
+      <!-- TOPBAR -->
+      <header class="topbar">
+        <div class="topbar-title" id="topbarTitle">My Stash</div>
+        <div class="topbar-right">
+          <div class="wallet-chip">
+            <span class="gb-icon">🟨</span>
+            <span id="topbarGBBalance">0 GB</span>
+          </div>
+          <div class="notif-btn"><i class="ti ti-bell"></i></div>
+          <div class="avatar" id="topbarAvatar"></div>
+        </div>
+      </header>
 
-async function submitListing() {
-  if (!currentUser || !currentUserData) return;
-  if (currentUserData.accountLocked) return showToast('Account restricted. Settle your debt first.', 'error');
+      <div class="screen-wrap">
 
-  const name = document.getElementById('listingName').value.trim();
-  const price = parseFloat(document.getElementById('listingPrice').value);
-  const category = document.getElementById('listingCategory').value;
-  const intent = document.getElementById('listingIntent').value;
-  const frame = document.getElementById('listingFrame').value;
-  const desc = document.getElementById('listingDesc').value.trim();
-  const imageUrl = document.getElementById('listingImageUrl').value;
-  const pinned = document.getElementById('listingPinned').checked;
-
-  if (!name) return showToast('Please enter an item name', 'error');
-  if (!price || isNaN(price)) return showToast('Please enter a valid price', 'error');
-  if (!category) return showToast('Please select a category', 'error');
-
-  // Collect spec fields
-  const specs = {};
-  const catFields = specFields[category] || [];
-  catFields.forEach(f => {
-    const el = document.getElementById(f.id);
-    if (el && el.value) specs[f.id] = el.value.trim();
-  });
-
-  try {
-    await addDoc(collection(db, 'listings'), {
-      name,
-      priceSCR: price,
-      category,
-      intent,
-      frame,
-      description: desc,
-      imageUrl: imageUrl || '',
-      specs,
-      pinned,
-      sellerId: currentUser.uid,
-      sellerUsername: currentUserData.username,
-      sellerDisplayName: currentUserData.displayName || currentUserData.username,
-      status: 'active',
-      createdAt: serverTimestamp()
-    });
-    closeListingModal();
-    showToast('Item listed successfully!', 'success');
-  } catch (err) {
-    showToast('Error listing item: ' + err.message, 'error');
-  }
-}
-
-async function deleteListing(listingId) {
-  if (!confirm('Remove this listing?')) return;
-  try {
-    await deleteDoc(doc(db, 'listings', listingId));
-    showToast('Listing removed', 'info');
-  } catch (err) {
-    showToast('Error: ' + err.message, 'error');
-  }
-}
-
-// ═══════════════════════════════════════════
-// QUICK-STRIKE SHEET
-// ═══════════════════════════════════════════
-async function openSheet(listingId) {
-  const snap = await getDoc(doc(db, 'listings', listingId));
-  if (!snap.exists()) return showToast('Listing not found', 'error');
-  currentSheetListing = { id: listingId, ...snap.data() };
-  const l = currentSheetListing;
-
-  const imgEl = document.getElementById('sheetImg');
-  if (imgEl) {
-    imgEl.innerHTML = l.imageUrl
-      ? `<img src="${l.imageUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:12px">`
-      : getCategoryEmoji(l.category);
-  }
-  setText('sheetName', l.name);
-  setText('sheetSeller', 'Listed by @' + (l.sellerUsername || 'unknown'));
-  setText('sheetVal', 'SCR ' + Number(l.priceSCR || 0).toLocaleString());
-
-  const isGrail = l.intent === 'grail';
-  const pitch = document.getElementById('autoPitch');
-  const actionBtns = document.getElementById('actionBtns');
-  const actionLabel = document.getElementById('actionLabel');
-  const grailNotice = document.getElementById('grailNotice');
-  const pitchText = document.getElementById('pitchText');
-
-  if (isGrail) {
-    if (pitch) pitch.style.display = 'none';
-    if (actionBtns) actionBtns.style.display = 'none';
-    if (actionLabel) actionLabel.style.display = 'none';
-    if (grailNotice) grailNotice.style.display = 'block';
-  } else {
-    if (pitch) pitch.style.display = '';
-    if (actionBtns) actionBtns.style.display = '';
-    if (actionLabel) actionLabel.style.display = '';
-    if (grailNotice) grailNotice.style.display = 'none';
-    const msg = l.intent === 'trade'
-      ? `"Yo! I saw your <b>${escHtml(l.name)}</b> on Stash — I've got heat to swap. Let's talk."`
-      : `"Yo! I saw your <b>${escHtml(l.name)}</b> on Stash. What's your best price?"`;
-    if (pitchText) pitchText.innerHTML = msg;
-  }
-  document.getElementById('sheetOverlay').classList.add('open');
-  document.body.style.overflow = 'hidden';
-}
-
-function closeSheet() {
-  document.getElementById('sheetOverlay').classList.remove('open');
-  document.body.style.overflow = '';
-  currentSheetListing = null;
-}
-
-async function reserveItem() {
-  if (!currentUser || !currentSheetListing) return;
-  if (!currentUserData) return showToast('User data not loaded', 'error');
-
-  const ESCROW_COST = 100; // GB required to reserve
-  if (currentUserData.goldBlocks < ESCROW_COST) {
-    return showToast(`You need ${ESCROW_COST} GB to reserve an item. Visit the Exotic Shop to buy Gold Blocks.`, 'error');
-  }
-
-  try {
-    const lockEscrowFn = httpsCallable(functions, 'lockEscrow');
-    await lockEscrowFn({ listingId: currentSheetListing.id, goldBlockAmount: ESCROW_COST });
-    closeSheet();
-    showToast('Item reserved! Go to My Trades to manage the handshake.', 'success');
-    switchScreen('trades');
-  } catch (err) {
-    showToast('Error reserving item: ' + err.message, 'error');
-  }
-}
-
-// ═══════════════════════════════════════════
-// TRADES SCREEN
-// ═══════════════════════════════════════════
-async function loadTrades() {
-  if (!currentUser) return;
-
-  // Active trades (as buyer or seller)
-  const buyerQ = query(collection(db, 'trades'), where('buyerId', '==', currentUser.uid), where('status', '==', 'pending'));
-  const sellerQ = query(collection(db, 'trades'), where('sellerId', '==', currentUser.uid), where('status', '==', 'pending'));
-
-  const [buyerSnap, sellerSnap] = await Promise.all([getDocs(buyerQ), getDocs(sellerQ)]);
-  const trades = [
-    ...buyerSnap.docs.map(d => ({ id: d.id, role: 'buyer', ...d.data() })),
-    ...sellerSnap.docs.map(d => ({ id: d.id, role: 'seller', ...d.data() }))
-  ];
-
-  const tradesList = document.getElementById('activeTradesList');
-  if (!tradesList) return;
-
-  if (trades.length === 0) {
-    tradesList.innerHTML = `<div class="empty-state"><div class="empty-icon">🔄</div><div class="empty-title">No Active Trades</div><div class="empty-sub">When you reserve an item or someone reserves yours, trades appear here.</div></div>`;
-  } else {
-    tradesList.innerHTML = trades.map(t => {
-      const expiresAt = t.expiresAt?.toDate ? t.expiresAt.toDate() : new Date(t.expiresAt);
-      const timeLeft = Math.max(0, expiresAt - Date.now());
-      const hours = Math.floor(timeLeft / 3600000);
-      const mins = Math.floor((timeLeft % 3600000) / 60000);
-      const isSeller = t.role === 'seller';
-      return `
-        <div class="glass-card" style="margin-bottom:12px">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-            <div>
-              <div style="font-size:14px;font-weight:700">Trade #${t.id.substring(0,8)}</div>
-              <div style="font-size:12px;color:var(--text-muted)">You are the ${t.role}</div>
+        <!-- ═══════════ DASHBOARD ═══════════ -->
+        <div class="screen active" id="screen-dashboard">
+          <div id="lockedBanner" class="locked-banner" style="display:none">
+            <i class="ti ti-lock"></i>
+            <div class="locked-banner-text">
+              <div class="locked-banner-title">Account Restricted</div>
+              <div class="locked-banner-sub">You have an unpaid platform fee. Settle your debt to unlock listing and trading.</div>
             </div>
-            <div style="text-align:right">
-              <div style="font-size:13px;font-weight:700;color:var(--gold)">${hours}h ${mins}m remaining</div>
-              <div class="intent-tag tag-trade">Pending QR Scan</div>
+            <button class="buy-btn" onclick="switchScreen('trades')">View Debt</button>
+          </div>
+
+          <div class="nw-hero">
+            <div class="nw-label">Total Portfolio Value</div>
+            <div class="nw-value"><span class="currency">SCR</span><span id="nwValue">0</span></div>
+            <div class="nw-trend" id="nwTrend">Loading portfolio...</div>
+          </div>
+
+          <div class="stats-row">
+            <div class="stat-card">
+              <div class="stat-label">Total Items</div>
+              <div class="stat-value" id="dashTotalItems">0</div>
+              <div class="stat-sub">In your collection</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Gold Blocks</div>
+              <div class="stat-value gold" id="dashGBBalance">0</div>
+              <div class="stat-sub">Available balance</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Trader Rep</div>
+              <div class="stat-value" id="dashTraderRep">0</div>
+              <div class="stat-sub">Verified trades</div>
             </div>
           </div>
-          <div style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
-            🟨 ${t.goldBlocksLocked} GB locked as collateral — refunded on successful handshake
-          </div>
-          ${isSeller
-            ? `<button class="modal-btn" onclick="openQRModal('${t.id}','seller')">Generate QR Code</button>`
-            : `<button class="modal-btn" onclick="openQRModal('${t.id}','buyer')">Scan Seller QR</button>`
-          }
-        </div>`;
-    }).join('');
-  }
 
-  // Debt ledger
-  const debtQ = query(collection(db, 'debtLedger'), where('userId', '==', currentUser.uid), where('status', '==', 'unpaid'));
-  const debtSnap = await getDocs(debtQ);
-  const debts = debtSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-  const debtList = document.getElementById('debtLedgerList');
-  if (debtList) {
-    if (debts.length === 0) {
-      debtList.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-muted);font-size:13px">No outstanding debts. You're all clear ✓</div>`;
-    } else {
-      debtList.innerHTML = debts.map(d => `
-        <div class="glass-card" style="margin-bottom:10px;border-color:rgba(255,77,77,0.3)">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <div>
-              <div style="font-size:14px;font-weight:700;color:var(--red)">Unpaid Platform Fee</div>
-              <div style="font-size:12px;color:var(--text-muted)">Trade: ${d.tradeId?.substring(0,8) || 'N/A'}</div>
+          <div class="filter-row">
+            <div class="filter-chip active" onclick="setChipFilter(this)">All</div>
+            <div class="filter-chip" onclick="setChipFilter(this)">Watches</div>
+            <div class="filter-chip" onclick="setChipFilter(this)">Sneakers</div>
+            <div class="filter-chip" onclick="setChipFilter(this)">Tech</div>
+            <div class="filter-chip" onclick="setChipFilter(this)">Jewelry</div>
+            <div class="filter-chip" onclick="setChipFilter(this)">Cars</div>
+            <div class="filter-chip" onclick="setChipFilter(this)">Parts Bin</div>
+          </div>
+
+          <div class="section-header">
+            <div class="section-title">⭐ Top Shelf — Pinned Grails</div>
+            <div class="section-line"></div>
+            <div class="section-count" id="pinnedCount">0 Pinned</div>
+          </div>
+          <div class="top-shelf-grid" id="pinnedGrid">
+            <div class="empty-state" style="grid-column:span 3;padding:40px">
+              <div class="empty-icon">📌</div>
+              <div class="empty-title">No Grails Pinned Yet</div>
+              <div class="empty-sub">Pin your most prized items to the Top Shelf when listing them.</div>
             </div>
-            <div style="font-size:18px;font-weight:800;color:var(--red)">SCR ${Number(d.amountSCR || 0).toFixed(2)}</div>
           </div>
-          <div style="font-size:12px;color:var(--text-muted);margin-top:8px">Contact admin to settle this debt and unlock your account.</div>
-        </div>`).join('');
-    }
-  }
-}
 
-// ═══════════════════════════════════════════
-// QR HANDSHAKE MODAL
-// ═══════════════════════════════════════════
-let qrInstance = null;
-let qrTimerInterval = null;
-let qrScannerInstance = null;
+          <div class="section-header">
+            <div class="section-title">📦 My Listings</div>
+            <div class="section-line"></div>
+            <div class="section-count" id="myListingsCount">0 Items</div>
+          </div>
+          <div class="closet-grid" id="myListingsGrid">
+            <div class="empty-state" style="grid-column:span 4;padding:40px">
+              <div class="empty-icon">📦</div>
+              <div class="empty-title">Your Stash is Empty</div>
+              <div class="empty-sub">Start listing your items to build your collection portfolio.</div>
+              <button class="modal-btn" style="width:auto;padding:14px 28px" onclick="openListingModal()">List Your First Item</button>
+            </div>
+          </div>
+        </div>
 
-async function openQRModal(tradeId, role) {
-  document.getElementById('qrModal').classList.add('open');
-  const sellerView = document.getElementById('qrSellerView');
-  const buyerView = document.getElementById('qrBuyerView');
-  setText('qrModalTitle', role === 'seller' ? 'Show QR to Buyer' : 'Scan Buyer QR');
+        <!-- ═══════════ MARKETPLACE ═══════════ -->
+        <div class="screen" id="screen-marketplace">
+          <div class="explore-search">
+            <input class="search-input" id="marketSearch" type="text" placeholder="Search items, brands, categories..." oninput="filterMarketplace()" />
+            <button class="search-btn"><i class="ti ti-search"></i></button>
+          </div>
+          <div class="filter-row" id="marketFilterRow">
+            <div class="filter-chip active" onclick="setMarketFilter(this,'all')">All</div>
+            <div class="filter-chip" onclick="setMarketFilter(this,'Watches')">Watches</div>
+            <div class="filter-chip" onclick="setMarketFilter(this,'Sneakers')">Sneakers</div>
+            <div class="filter-chip" onclick="setMarketFilter(this,'Tech')">Tech</div>
+            <div class="filter-chip" onclick="setMarketFilter(this,'Jewelry')">Jewelry</div>
+            <div class="filter-chip" onclick="setMarketFilter(this,'Cars')">Cars</div>
+            <div class="filter-chip" onclick="setMarketFilter(this,'Parts Bin')">Parts Bin</div>
+          </div>
+          <div class="section-header">
+            <div class="section-title">🔥 Active Listings</div>
+            <div class="section-line"></div>
+            <div class="section-count" id="marketCount">Loading...</div>
+          </div>
+          <div class="listing-grid" id="marketplaceGrid">
+            <div style="grid-column:span 4;text-align:center;padding:60px;color:var(--text-muted)">Loading listings...</div>
+          </div>
+        </div>
 
-  if (role === 'seller') {
-    sellerView.style.display = 'block';
-    buyerView.style.display = 'none';
-    try {
-      const generateQRFn = httpsCallable(functions, 'generateQR');
-      const result = await generateQRFn({ tradeId });
-      const { payload, expiresAt } = result.data;
-      // Generate QR code
-      const qrDisplay = document.getElementById('qrCodeDisplay');
-      qrDisplay.innerHTML = '';
-      qrInstance = new QRCode(qrDisplay, {
-        text: payload,
-        width: 180,
-        height: 180,
-        colorDark: '#000000',
-        colorLight: '#ffffff',
-        correctLevel: QRCode.CorrectLevel.H
-      });
-      // Countdown timer
-      const expiry = new Date(expiresAt);
-      qrTimerInterval = setInterval(() => {
-        const left = Math.max(0, expiry - Date.now());
-        const m = Math.floor(left / 60000);
-        const s = Math.floor((left % 60000) / 1000);
-        setText('qrTimer', `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`);
-        if (left === 0) clearInterval(qrTimerInterval);
-      }, 1000);
-    } catch (err) {
-      showToast('Error generating QR: ' + err.message, 'error');
-      closeQRModal();
-    }
-  } else {
-    sellerView.style.display = 'none';
-    buyerView.style.display = 'block';
-    // Start QR scanner
-    setTimeout(() => {
-      qrScannerInstance = new Html5Qrcode('qrReader');
-      qrScannerInstance.start(
-        { facingMode: 'environment' },
-        { fps: 10, qrbox: 200 },
-        async (decodedText) => {
-          await qrScannerInstance.stop();
-          await handleQRScan(decodedText);
-        },
-        () => {}
-      ).catch(err => showToast('Camera error: ' + err, 'error'));
-    }, 300);
-  }
-}
-
-async function handleQRScan(payload) {
-  showToast('QR detected. Running verification...', 'info');
-  try {
-    // Get GPS
-    const gps = await new Promise((res, rej) =>
-      navigator.geolocation.getCurrentPosition(
-        p => res({ lat: p.coords.latitude, lng: p.coords.longitude }),
-        () => res(null),
-        { enableHighAccuracy: true, timeout: 5000 }
-      )
-    );
-
-    const verifyFn = httpsCallable(functions, 'verifyQRScan');
-    await verifyFn({
-      qrPayload: payload,
-      scanData: {
-        buyerGPS: gps,
-        buyerDeviceId: await getDeviceId(),
-        buyerIP: null // handled server-side
-      }
-    });
-    closeQRModal();
-    showToast('🎉 Trade verified! Gold Blocks refunded.', 'success');
-    loadTrades();
-  } catch (err) {
-    showToast('Verification failed: ' + err.message, 'error');
-    closeQRModal();
-  }
-}
-
-function closeQRModal() {
-  document.getElementById('qrModal').classList.remove('open');
-  if (qrTimerInterval) clearInterval(qrTimerInterval);
-  if (qrScannerInstance) qrScannerInstance.stop().catch(() => {});
-  qrInstance = null;
-  qrScannerInstance = null;
-}
-
-async function getDeviceId() {
-  const stored = localStorage.getItem('stash_device_id');
-  if (stored) return stored;
-  const id = crypto.randomUUID();
-  localStorage.setItem('stash_device_id', id);
-  return id;
-}
-
-// ═══════════════════════════════════════════
-// SLIDE TO PAY
-// ═══════════════════════════════════════════
-let slideSkinName = '';
-let slideSkinCost = 0;
-
-function openSlideModal(name, cost) {
-  slideSkinName = name;
-  slideSkinCost = cost;
-  setText('slideTitle', name);
-  setText('slidePrice', cost.toLocaleString() + ' GB');
-  document.getElementById('slideWrap').style.display = '';
-  document.getElementById('slideSuccess').style.display = 'none';
-  document.getElementById('slideThumb').style.transform = 'translateX(0)';
-  setText('slideTextEl', 'Slide to Confirm');
-  document.getElementById('slideTextEl').style.opacity = '1';
-  document.getElementById('slideModal').classList.add('open');
-  initSlide();
-}
-
-function closeSlideModal() {
-  document.getElementById('slideModal').classList.remove('open');
-}
-
-function initSlide() {
-  const wrap = document.getElementById('slideWrap');
-  const thumb = document.getElementById('slideThumb');
-  const textEl = document.getElementById('slideTextEl');
-  const track = wrap.querySelector('.slide-track');
-  let dragging = false, startX = 0;
-  const getMax = () => track.offsetWidth - thumb.offsetWidth;
-  const getCur = () => parseFloat(thumb.style.transform.replace('translateX(','')) || 0;
-
-  const newWrap = wrap.cloneNode(true);
-  wrap.parentNode.replaceChild(newWrap, wrap);
-  const nw = document.getElementById('slideWrap');
-  const nt = nw.querySelector('.slide-thumb');
-  const ntxt = nw.querySelector('.slide-text');
-
-  function onStart(e) { dragging = true; nt.style.transition = 'none'; startX = (e.touches ? e.touches[0].clientX : e.clientX) - getCurN(); }
-  function getCurN() { return parseFloat(nt.style.transform.replace('translateX(','')) || 0; }
-  function onMove(e) {
-    if (!dragging) return; e.preventDefault();
-    const x = Math.max(0, Math.min((e.touches ? e.touches[0].clientX : e.clientX) - startX, getMax()));
-    nt.style.transform = `translateX(${x}px)`;
-    ntxt.style.opacity = Math.max(0, 1 - (x / getMax()) * 1.5);
-    if (x >= getMax() * 0.92) onComplete();
-  }
-  function onEnd() {
-    if (!dragging) return; dragging = false;
-    if (getCurN() < getMax() * 0.92) { nt.style.transition = 'transform 0.3s'; nt.style.transform = 'translateX(0)'; ntxt.style.opacity = '1'; }
-  }
-  async function onComplete() {
-    dragging = false; nt.style.transition = 'transform 0.2s'; nt.style.transform = `translateX(${getMax()}px)`;
-    // Deduct GB and record purchase
-    if (currentUser && currentUserData) {
-      if (currentUserData.goldBlocks < slideSkinCost) {
-        showToast('Not enough Gold Blocks!', 'error');
-        closeSlideModal(); return;
-      }
-      try {
-        await updateDoc(doc(db, 'users', currentUser.uid), { goldBlocks: increment(-slideSkinCost) });
-        await addDoc(collection(db, 'gbTransactions'), {
-          userId: currentUser.uid, amount: -slideSkinCost,
-          type: 'skin_purchase', skinName: slideSkinName,
-          createdAt: serverTimestamp()
-        });
-        setTimeout(() => {
-          document.getElementById('slideWrap').style.display = 'none';
-          document.getElementById('slideSuccess').style.display = 'block';
-          setTimeout(closeSlideModal, 2000);
-        }, 300);
-        showToast(`${slideSkinName} unlocked!`, 'success');
-      } catch (err) { showToast('Purchase failed: ' + err.message, 'error'); closeSlideModal(); }
-    }
-  }
-
-  nw.addEventListener('mousedown', onStart);
-  nw.addEventListener('touchstart', onStart, { passive: false });
-  window.addEventListener('mousemove', onMove);
-  window.addEventListener('touchmove', onMove, { passive: false });
-  window.addEventListener('mouseup', onEnd);
-  window.addEventListener('touchend', onEnd);
-}
-
-// ═══════════════════════════════════════════
-// ADMIN PANEL
-// ═══════════════════════════════════════════
-async function adminCreditGB() {
-  const username = document.getElementById('adminUsername').value.trim().replace('@','');
-  const amount = parseInt(document.getElementById('adminGBAmount').value);
-  const note = document.getElementById('adminNote').value.trim();
-  if (!username || !amount) return showToast('Fill in all fields', 'error');
-
-  try {
-    const creditFn = httpsCallable(functions, 'adminCreditGoldBlocks');
-    // Find user by username
-    const userSnap = await getDocs(query(collection(db, 'users'), where('username', '==', username)));
-    if (userSnap.empty) return showToast('User not found', 'error');
-    const userId = userSnap.docs[0].id;
-    await creditFn({ userId, amount, note });
-    showToast(`Credited ${amount} GB to @${username}`, 'success');
-  } catch (err) { showToast('Error: ' + err.message, 'error'); }
-}
-
-async function adminSettleDebt() {
-  const username = document.getElementById('adminDebtUsername').value.trim().replace('@','');
-  const debtId = document.getElementById('adminDebtId').value.trim();
-  if (!username || !debtId) return showToast('Fill in all fields', 'error');
-
-  try {
-    const settleFn = httpsCallable(functions, 'settleDebt');
-    const userSnap = await getDocs(query(collection(db, 'users'), where('username', '==', username)));
-    if (userSnap.empty) return showToast('User not found', 'error');
-    const userId = userSnap.docs[0].id;
-    const result = await settleFn({ userId, debtId });
-    showToast(result.data.accountUnlocked ? 'Debt settled & account unlocked!' : 'Debt settled', 'success');
-  } catch (err) { showToast('Error: ' + err.message, 'error'); }
-}
-
-async function loadAdminData() {
-  try {
-    const [usersSnap, listingsSnap, tradesSnap, debtsSnap] = await Promise.all([
-      getDocs(collection(db, 'users')),
-      getDocs(query(collection(db, 'listings'), where('status', '==', 'active'))),
-      getDocs(query(collection(db, 'trades'), where('status', '==', 'completed'))),
-      getDocs(query(collection(db, 'debtLedger'), where('status', '==', 'unpaid')))
-    ]);
-    setText('adminTotalUsers', usersSnap.size);
-    setText('adminTotalListings', listingsSnap.size);
-    setText('adminTotalTrades', tradesSnap.size);
-
-    const debts = debtsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-    const adminDebtList = document.getElementById('adminDebtList');
-    if (adminDebtList) {
-      adminDebtList.innerHTML = debts.length === 0
-        ? `<div style="text-align:center;padding:40px;color:var(--text-muted)">No pending debts</div>`
-        : debts.map(d => `
-          <div class="glass-card" style="margin-bottom:10px">
-            <div style="display:flex;justify-content:space-between;align-items:center">
-              <div>
-                <div style="font-size:13px;font-weight:700">User: ${d.userId?.substring(0,12)}...</div>
-                <div style="font-size:11px;color:var(--text-muted)">Debt ID: ${d.id}</div>
+        <!-- ═══════════ EXOTIC SHOP ═══════════ -->
+        <div class="screen" id="screen-shop">
+          <div class="shop-hero">
+            <div class="shop-hero-text">
+              <div class="shop-hero-label">✦ Limited Drop</div>
+              <div class="shop-hero-title">The Exotic Shop</div>
+              <div class="shop-hero-sub">Exclusive card frames and cosmetics. Each drop rotates every 24 hours — spend your Gold Blocks.</div>
+            </div>
+            <div class="countdown-wrap">
+              <div class="countdown-label">Next Drop In</div>
+              <div class="countdown">
+                <div class="count-block"><div class="count-num" id="cd-h">00</div><div class="count-lbl">Hrs</div></div>
+                <div class="count-block"><div class="count-num" id="cd-m">00</div><div class="count-lbl">Min</div></div>
+                <div class="count-block"><div class="count-num" id="cd-s">00</div><div class="count-lbl">Sec</div></div>
               </div>
-              <div style="font-size:16px;font-weight:800;color:var(--red)">SCR ${Number(d.amountSCR || 0).toFixed(2)}</div>
             </div>
-          </div>`).join('');
-    }
-  } catch (err) { showToast('Admin load error: ' + err.message, 'error'); }
-}
+          </div>
+          <div class="section-header"><div class="section-title">🎁 Current Drop</div><div class="section-line"></div><div class="section-count">5 Items</div></div>
+          <div class="shop-grid">
+            <div class="skin-card skin-gold"><div class="skin-preview gold-p"><div class="limited-badge">LIMITED</div>⌚</div><div class="skin-name">Liquid Gold Frame</div><div class="skin-desc">High-gloss metallic gold border that reflects light. The ultimate flex for luxury timepieces.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>850 GB</div><button class="buy-btn" onclick="openSlideModal('Liquid Gold Frame',850)">Buy Now</button></div></div>
+            <div class="skin-card skin-holo"><div class="skin-preview holo-p"><div class="limited-badge">HOT</div>👟</div><div class="skin-name">Holographic Foil Frame</div><div class="skin-desc">Iridescent color-shifting gradient that reacts to cursor movement and device tilt.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>1,200 GB</div><button class="buy-btn" onclick="openSlideModal('Holographic Foil Frame',1200)">Buy Now</button></div></div>
+            <div class="skin-card skin-purple"><div class="skin-preview purple-p">💍</div><div class="skin-name">Royal Purple Frame</div><div class="skin-desc">A deep purple glow reserved for your rarest grail items.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>600 GB</div><button class="buy-btn" onclick="openSlideModal('Royal Purple Frame',600)">Buy Now</button></div></div>
+            <div class="skin-card skin-carbon"><div class="skin-preview carbon-p">💻</div><div class="skin-name">Carbon Fiber Frame</div><div class="skin-desc">Textured dark-weave border for tech, gaming rigs, and cars.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>400 GB</div><button class="buy-btn" onclick="openSlideModal('Carbon Fiber Frame',400)">Buy Now</button></div></div>
+            <div class="skin-card skin-neon"><div class="skin-preview neon-p"><div class="limited-badge">NEW</div>🎮</div><div class="skin-name">Neon Grid Frame</div><div class="skin-desc">Glowing pulsing cyber-lines for gaming and retro-modern tech collections.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>750 GB</div><button class="buy-btn" onclick="openSlideModal('Neon Grid Frame',750)">Buy Now</button></div></div>
+          </div>
+          <div class="section-header" style="margin-top:32px"><div class="section-title">🟨 Buy Gold Blocks</div><div class="section-line"></div></div>
+          <div class="stats-row">
+            <div class="stat-card" style="cursor:pointer;text-align:center" onclick="showToast('Contact admin to purchase Gold Blocks','info')">
+              <div style="font-size:32px;margin-bottom:8px">🟨</div>
+              <div class="stat-label">500 GB</div>
+              <div class="stat-value gold">SCR 250</div>
+              <div class="stat-sub">Contact admin to top up</div>
+            </div>
+            <div class="stat-card" style="cursor:pointer;text-align:center" onclick="showToast('Contact admin to purchase Gold Blocks','info')">
+              <div style="font-size:32px;margin-bottom:8px">🟨🟨</div>
+              <div class="stat-label">1,200 GB</div>
+              <div class="stat-value gold">SCR 500</div>
+              <div class="stat-sub">Best value</div>
+            </div>
+            <div class="stat-card" style="cursor:pointer;text-align:center" onclick="showToast('Contact admin to purchase Gold Blocks','info')">
+              <div style="font-size:32px;margin-bottom:8px">🟨🟨🟨</div>
+              <div class="stat-label">2,800 GB</div>
+              <div class="stat-value gold">SCR 1,000</div>
+              <div class="stat-sub">Power user pack</div>
+            </div>
+          </div>
+        </div>
 
-// ═══════════════════════════════════════════
-// COUNTDOWN TIMER (Exotic Shop)
-// ═══════════════════════════════════════════
-function startCountdown() {
-  const nextMidnight = new Date();
-  nextMidnight.setHours(24, 0, 0, 0);
+        <!-- ═══════════ LEADERBOARD ═══════════ -->
+        <div class="screen" id="screen-leaderboard">
+          <div class="filter-row">
+            <div class="filter-chip active" onclick="setChipFilter(this)">Portfolio Value</div>
+            <div class="filter-chip" onclick="setChipFilter(this)">Trader Rep</div>
+            <div class="filter-chip" onclick="setChipFilter(this)">Most Trades</div>
+          </div>
+          <div class="section-header"><div class="section-title">&#127942; Top Collectors</div><div class="section-line"></div><div class="section-count">Global</div></div>
+          <div id="leaderboardPodium" class="lb-podium"></div>
+          <div class="section-header"><div class="section-title">&#128202; Full Rankings</div><div class="section-line"></div></div>
+          <div class="lb-list" id="leaderboardList">
+            <div style="text-align:center;padding:40px;color:var(--text-muted)">Loading leaderboard...</div>
+          </div>
+        </div>
 
-  setInterval(() => {
-    const left = Math.max(0, nextMidnight - Date.now());
-    const h = Math.floor(left / 3600000);
-    const m = Math.floor((left % 3600000) / 60000);
-    const s = Math.floor((left % 60000) / 1000);
-    setText('cd-h', String(h).padStart(2,'0'));
-    setText('cd-m', String(m).padStart(2,'0'));
-    setText('cd-s', String(s).padStart(2,'0'));
-  }, 1000);
-}
+        <!-- ═══════════ PUBLIC PORTFOLIO ═══════════ -->
+        <div class="screen" id="screen-portfolio">
+          <div class="profile-header">
+            <div class="profile-avatar-wrap">
+              <div class="profile-avatar" id="portAvatar"></div>
+              <div class="verified-badge">&#10003;</div>
+            </div>
+            <div>
+              <div class="profile-name" id="portName">Your Name</div>
+              <div class="profile-handle" id="portHandle">@handle</div>
+              <div class="profile-bio" id="portBio">Add a bio in settings.</div>
+              <div class="profile-socials">
+                <div class="social-chip verified-chip"><i class="ti ti-shield-check"></i><span id="portTraderRep">0</span> Verified Trades</div>
+                <div class="social-chip" onclick="copyProfileLink()"><i class="ti ti-link"></i>Copy Profile Link</div>
+              </div>
+            </div>
+            <div class="profile-right">
+              <div>
+                <div class="pv-label">Stash Value</div>
+                <div class="pv-number" id="portValue">SCR 0</div>
+                <div class="pv-sub" id="portItemCount">0 items</div>
+              </div>
+              <div class="share-btn" onclick="copyProfileLink()"><i class="ti ti-share"></i> Share</div>
+            </div>
+          </div>
+          <div class="divider-line"></div>
+          <div class="pub-stats-row">
+            <div class="stat-card"><div class="stat-label">Items</div><div class="stat-value" id="portStatItems">0</div></div>
+            <div class="stat-card"><div class="stat-label">Portfolio</div><div class="stat-value gold" id="portStatValue">SCR 0</div></div>
+            <div class="stat-card"><div class="stat-label">Trader Rep</div><div class="stat-value" id="portStatRep">0</div></div>
+            <div class="stat-card"><div class="stat-label">Gold Blocks</div><div class="stat-value gold" id="portStatGB">0 GB</div></div>
+          </div>
+          <div class="filter-row">
+            <div class="filter-chip active" onclick="setPubFilter(this,'all')"><span class="chip-dot dot-all"></span>All</div>
+            <div class="filter-chip" onclick="setPubFilter(this,'trade')"><span class="chip-dot dot-trade"></span>Looking to Trade</div>
+            <div class="filter-chip" onclick="setPubFilter(this,'cash')"><span class="chip-dot dot-cash"></span>Accepting Offers</div>
+            <div class="filter-chip" onclick="setPubFilter(this,'grail')"><span class="chip-dot dot-grail"></span>Personal Grail</div>
+          </div>
+          <div class="section-header"><div class="section-title">&#128230; Public Collection</div><div class="section-line"></div><div class="section-count" id="pubCount">0 Items</div></div>
+          <div class="portfolio-grid" id="portfolioGrid">
+            <div class="empty-state" style="grid-column:span 4">
+              <div class="empty-icon">&#128230;</div>
+              <div class="empty-title">No Public Listings</div>
+              <div class="empty-sub">Your listed items will appear here.</div>
+            </div>
+          </div>
+        </div>
 
-// ═══════════════════════════════════════════
-// HELPERS
-// ═══════════════════════════════════════════
-function setChipFilter(el) {
-  el.closest('.filter-row').querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
-  el.classList.add('active');
-}
+        <!-- ═══════════ MY TRADES ═══════════ -->
+        <div class="screen" id="screen-trades">
+          <div class="section-header"><div class="section-title">&#128260; Active Trades</div><div class="section-line"></div></div>
+          <div id="activeTradesList">
+            <div class="empty-state">
+              <div class="empty-icon">&#128260;</div>
+              <div class="empty-title">No Active Trades</div>
+              <div class="empty-sub">When you reserve an item or someone reserves yours, trades appear here.</div>
+            </div>
+          </div>
+          <div class="section-header" style="margin-top:32px"><div class="section-title">&#128203; Debt Ledger</div><div class="section-line"></div></div>
+          <div id="debtLedgerList">
+            <div style="text-align:center;padding:40px;color:var(--text-muted);font-size:13px">No outstanding debts. You're all clear &#10003;</div>
+          </div>
+        </div>
 
-function animateCount(el, target) {
-  let cur = 0;
-  const steps = 60;
-  const inc = target / steps;
-  const interval = setInterval(() => {
-    cur = Math.min(cur + inc, target);
-    el.textContent = Math.round(cur).toLocaleString();
-    if (cur >= target) clearInterval(interval);
-  }, 1800 / steps);
-}
+        <!-- ═══════════ ADMIN PANEL ═══════════ -->
+        <div class="screen" id="screen-admin">
+          <div class="admin-grid">
+            <div class="admin-card">
+              <div class="admin-card-title">🟨 Credit Gold Blocks</div>
+              <div class="modal-group"><div class="modal-label">Username</div><input class="modal-input" id="adminUsername" type="text" placeholder="@username" /></div>
+              <div class="modal-group"><div class="modal-label">Amount (GB)</div><input class="modal-input" id="adminGBAmount" type="number" placeholder="e.g. 500" /></div>
+              <div class="modal-group"><div class="modal-label">Note</div><input class="modal-input" id="adminNote" type="text" placeholder="e.g. Cash received SCR 250" /></div>
+              <button class="modal-btn" onclick="adminCreditGB()">Credit Gold Blocks</button>
+            </div>
+            <div class="admin-card">
+              <div class="admin-card-title">&#128203; Settle Seller Debt</div>
+              <div class="modal-group"><div class="modal-label">Username</div><input class="modal-input" id="adminDebtUsername" type="text" placeholder="@username" /></div>
+              <div class="modal-group"><div class="modal-label">Debt ID</div><input class="modal-input" id="adminDebtId" type="text" placeholder="Debt document ID" /></div>
+              <button class="modal-btn" onclick="adminSettleDebt()">Settle Debt & Unlock Account</button>
+            </div>
+          </div>
+          <div class="section-header"><div class="section-title">&#128203; All Pending Debts</div><div class="section-line"></div></div>
+          <div id="adminDebtList">
+            <div style="text-align:center;padding:40px;color:var(--text-muted)">Loading...</div>
+          </div>
+          <div class="section-header" style="margin-top:28px"><div class="section-title">&#128202; Platform Stats</div><div class="section-line"></div></div>
+          <div class="stats-row">
+            <div class="stat-card"><div class="stat-label">Total Users</div><div class="stat-value" id="adminTotalUsers">-</div></div>
+            <div class="stat-card"><div class="stat-label">Active Listings</div><div class="stat-value" id="adminTotalListings">-</div></div>
+            <div class="stat-card"><div class="stat-label">Completed Trades</div><div class="stat-value" id="adminTotalTrades">-</div></div>
+          </div>
+        </div>
 
-function getCategoryEmoji(cat) {
-  const map = { Watches:'⌚', Sneakers:'👟', Tech:'💻', Jewelry:'💍', Cars:'🚗', Bags:'👜', 'Parts Bin':'🔧', Other:'📦' };
-  return map[cat] || '📦';
-}
+      </div><!-- screen-wrap -->
+    </div><!-- main-area -->
+  </div><!-- app-layout -->
 
-function getFrameClass(frame) {
-  const map = { gold:'gold-frame', holo:'holo-frame', purple:'grail-frame', carbon:'', neon:'' };
-  return map[frame] || '';
-}
+  <!-- MOBILE BOTTOM NAV -->
+  <nav class="bottom-nav">
+    <div class="nav-item active" data-screen="dashboard"><i class="ti ti-layout-grid"></i>Stash</div>
+    <div class="nav-item" data-screen="marketplace"><i class="ti ti-world"></i>Market</div>
+    <div class="nav-item"><div class="nav-add-btn" onclick="openListingModal()"><i class="ti ti-plus"></i></div></div>
+    <div class="nav-item" data-screen="shop"><i class="ti ti-shopping-bag"></i>Shop</div>
+    <div class="nav-item" data-screen="portfolio"><i class="ti ti-user"></i>Profile</div>
+  </nav>
 
-function getFrameBadge(frame) {
-  const badges = {
-    gold: `<div class="frame-badge badge-gold">✦ Liquid Gold Frame</div>`,
-    holo: `<div class="frame-badge badge-holo">◈ Holo Foil Frame</div>`,
-    purple: `<div class="frame-badge badge-grail">👑 Royal Purple Frame</div>`
-  };
-  return badges[frame] || '';
-}
+</div><!-- appWrap -->
 
-function getIntentLabel(intent) {
-  const map = { trade:'Looking to Trade', cash:'Accepting Offers', grail:'Personal Grail' };
-  return map[intent] || intent;
-}
+<!-- ═══════════════════════════════════════
+     MODALS & SHEETS
+═══════════════════════════════════════ -->
 
-function escHtml(str) {
-  if (!str) return '';
-  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
+<!-- LIST ITEM MODAL -->
+<div class="modal-overlay" id="listingModal">
+  <div class="modal-sheet" style="max-width:520px">
+    <div class="modal-close" onclick="closeListingModal()"><i class="ti ti-x"></i></div>
+    <div class="modal-title">List an Item</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="modal-group" style="grid-column:span 2">
+        <div class="modal-label">Item Photo</div>
+        <div id="uploadPreview" onclick="triggerUpload()" style="width:100%;height:160px;background:rgba(255,255,255,0.04);border:2px dashed var(--glass-border);border-radius:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;transition:all 0.2s;overflow:hidden" onmouseover="this.style.borderColor='var(--gold)'" onmouseout="this.style.borderColor='var(--glass-border)'">
+          <i class="ti ti-photo-up" style="font-size:32px;color:var(--text-muted);margin-bottom:8px"></i>
+          <div style="font-size:13px;color:var(--text-muted)">Click to upload photo</div>
+        </div>
+        <input type="hidden" id="listingImageUrl" />
+      </div>
+      <div class="modal-group">
+        <div class="modal-label">Item Name</div>
+        <input class="modal-input" id="listingName" type="text" placeholder="e.g. Rolex Daytona" />
+      </div>
+      <div class="modal-group">
+        <div class="modal-label">Price (SCR)</div>
+        <input class="modal-input" id="listingPrice" type="number" placeholder="e.g. 45000" />
+      </div>
+      <div class="modal-group">
+        <div class="modal-label">Category</div>
+        <div class="custom-select-wrap" id="csCategory">
+          <input type="hidden" id="listingCategory" value="" />
+          <div class="cs-selected" onclick="toggleCS('csCategory')">
+            <span class="cs-placeholder" id="csCategoryLabel">Select category</span>
+            <i class="ti ti-chevron-down cs-arrow"></i>
+          </div>
+          <div class="cs-dropdown">
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Watches','⌚','updateSpecFields')"><span class="cs-opt-icon">⌚</span>Watches</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Sneakers','👟','updateSpecFields')"><span class="cs-opt-icon">👟</span>Sneakers</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Tech','💻','updateSpecFields')"><span class="cs-opt-icon">💻</span>Tech</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Jewelry','💍','updateSpecFields')"><span class="cs-opt-icon">💍</span>Jewelry</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Cars','🚗','updateSpecFields')"><span class="cs-opt-icon">🚗</span>Cars</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Bags','👜','updateSpecFields')"><span class="cs-opt-icon">👜</span>Bags</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Parts Bin','🔧','updateSpecFields')"><span class="cs-opt-icon">🔧</span>Parts Bin</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Other','📦','updateSpecFields')"><span class="cs-opt-icon">📦</span>Other</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-group">
+        <div class="modal-label">Intent</div>
+        <div class="custom-select-wrap" id="csIntent">
+          <input type="hidden" id="listingIntent" value="trade" />
+          <div class="cs-selected" onclick="toggleCS('csIntent')">
+            <span id="csIntentLabel">🔄 Looking to Trade</span>
+            <i class="ti ti-chevron-down cs-arrow"></i>
+          </div>
+          <div class="cs-dropdown">
+            <div class="cs-option selected" onclick="selectCS('csIntent','listingIntent','trade','🔄 Looking to Trade')"><span class="cs-opt-icon">🔄</span>Looking to Trade</div>
+            <div class="cs-option" onclick="selectCS('csIntent','listingIntent','cash','💰 Accepting Cash Offers')"><span class="cs-opt-icon">💰</span>Accepting Cash Offers</div>
+            <div class="cs-option" onclick="selectCS('csIntent','listingIntent','grail','👑 Personal Grail (View Only)')"><span class="cs-opt-icon">👑</span>Personal Grail (View Only)</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-group" style="grid-column:span 2" id="specFieldsWrap"></div>
+      <div class="modal-group" style="grid-column:span 2">
+        <div class="modal-label">Description</div>
+        <textarea class="modal-input" id="listingDesc" rows="3" placeholder="Condition, details, box & papers..."></textarea>
+      </div>
+      <div class="modal-group" style="grid-column:span 2">
+        <div class="modal-label">Card Frame</div>
+        <select class="modal-input" style="display:none" id="listingFrame">
+          <option value="default">Default (Free)</option>
+          <option value="gold">Liquid Gold Frame</option>
+          <option value="holo">Holographic Foil</option>
+          <option value="purple">Royal Purple</option>
+          <option value="carbon">Carbon Fiber</option>
+          <option value="neon">Neon Grid</option>
+        </select>
+      </div>
+      <div class="modal-group" style="grid-column:span 2;display:flex;align-items:center;gap:10px">
+        <input type="checkbox" id="listingPinned" style="width:18px;height:18px;accent-color:var(--gold)" />
+        <label for="listingPinned" style="font-size:13px;font-weight:600;color:var(--text-muted);cursor:pointer">Pin to Top Shelf (Grails only)</label>
+      </div>
+    </div>
+    <button class="modal-btn" onclick="submitListing()">List Item ✦</button>
+  </div>
+</div>
 
-function copyProfileLink() {
-  if (!currentUserData) return;
-  const link = `${window.location.origin}?user=${currentUserData.username}`;
-  navigator.clipboard.writeText(link).then(() => showToast('Profile link copied!', 'success'));
-}
+<!-- QUICK-STRIKE SHEET -->
+<div class="sheet-overlay" id="sheetOverlay">
+  <div class="bottom-sheet">
+    <div class="sheet-handle"></div>
+    <div style="display:flex;align-items:center;gap:18px;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:20px;padding:18px;margin-bottom:22px">
+      <div style="width:70px;height:70px;border-radius:12px;background:rgba(255,255,255,0.04);border:1px solid var(--glass-border);overflow:hidden;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:32px" id="sheetImg"></div>
+      <div style="flex:1">
+        <div style="font-size:17px;font-weight:800;color:var(--text);margin-bottom:4px" id="sheetName">Item</div>
+        <div style="font-size:12px;color:var(--text-muted)" id="sheetSeller">Listed by @handle</div>
+      </div>
+      <div style="font-size:22px;font-weight:900;color:var(--gold);flex-shrink:0" id="sheetVal">SCR 0</div>
+    </div>
+    <div style="background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:16px;padding:18px;margin-bottom:24px" id="autoPitch">
+      <div style="font-size:10px;font-weight:700;letter-spacing:1.5px;color:var(--text-muted);text-transform:uppercase;margin-bottom:10px">&#10022; Auto-generated opener</div>
+      <div style="font-size:14px;color:rgba(255,255,255,0.75);line-height:1.7;font-style:italic" id="pitchText"></div>
+    </div>
+    <div style="font-size:11px;font-weight:700;color:var(--green);text-align:center;padding:20px 0;display:none" id="grailNotice">&#128081; This item is a Personal Grail — not available for sale or trade.</div>
+    <div style="font-size:11px;font-weight:700;letter-spacing:1.5px;color:var(--text-muted);text-transform:uppercase;margin-bottom:12px" id="actionLabel">Reserve with Gold Blocks 🟨</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px" id="actionBtns">
+      <button style="display:flex;align-items:center;justify-content:center;gap:10px;border-radius:16px;padding:17px;font-size:14px;font-weight:700;cursor:pointer;font-family:Inter,sans-serif;background:var(--glass-gold);border:1px solid var(--glass-gold-border);color:var(--gold)" onclick="reserveItem()">
+        <span class="gb-icon">🟨</span>Reserve Item
+      </button>
+      <button style="display:flex;align-items:center;justify-content:center;gap:10px;border-radius:16px;padding:17px;font-size:14px;font-weight:700;cursor:pointer;font-family:Inter,sans-serif;background:rgba(37,211,102,0.09);border:1px solid rgba(37,211,102,0.28);color:#4ade80" onclick="closeSheet()">
+        <i class="ti ti-brand-whatsapp" style="font-size:22px"></i>WhatsApp Seller
+      </button>
+    </div>
+    <button style="display:flex;align-items:center;justify-content:center;gap:7px;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:14px;padding:14px;font-size:13px;font-weight:700;color:var(--text-muted);cursor:pointer;transition:all 0.2s;width:100%;font-family:Inter,sans-serif" onclick="closeSheet()">
+      <i class="ti ti-x"></i>Close
+    </button>
+  </div>
+</div>
 
-function showToast(msg, type = 'info') {
-  const wrap = document.getElementById('toastWrap');
-  if (!wrap) return;
-  const icons = { success:'ti-circle-check', error:'ti-circle-x', info:'ti-info-circle' };
-  const colors = { success:'var(--green)', error:'var(--red)', info:'var(--gold)' };
-  const toast = document.createElement('div');
-  toast.className = `toast ${type}`;
-  toast.innerHTML = `<i class="ti ${icons[type]}" style="font-size:18px;color:${colors[type]};flex-shrink:0"></i>${escHtml(msg)}`;
-  wrap.appendChild(toast);
-  setTimeout(() => { toast.style.opacity = '0'; toast.style.transform = 'translateX(20px)'; toast.style.transition = 'all 0.3s'; setTimeout(() => toast.remove(), 300); }, 3500);
-}
+<!-- QR HANDSHAKE MODAL -->
+<div class="modal-overlay" id="qrModal">
+  <div class="modal-sheet" style="max-width:400px;text-align:center">
+    <div class="modal-close" onclick="closeQRModal()"><i class="ti ti-x"></i></div>
+    <div class="modal-title" id="qrModalTitle">Safe Zone QR</div>
+    <div id="qrSellerView">
+      <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px">Show this QR to the buyer at your Safe Zone meetup</div>
+      <div id="qrCodeDisplay" class="qr-box">Generating...</div>
+      <div class="qr-timer" id="qrTimer">10:00</div>
+      <div class="qr-sub">QR expires in 10 minutes</div>
+    </div>
+    <div id="qrBuyerView" style="display:none">
+      <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px">Scan the seller's QR code to complete the trade</div>
+      <div id="qrReader" style="width:100%;border-radius:14px;overflow:hidden"></div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:12px">GPS verification will run automatically</div>
+    </div>
+  </div>
+</div>
 
-// ── Close modals on overlay click
-document.getElementById('sheetOverlay')?.addEventListener('click', e => { if (e.target === document.getElementById('sheetOverlay')) closeSheet(); });
-document.getElementById('slideModal')?.addEventListener('click', e => { if (e.target === document.getElementById('slideModal')) closeSlideModal(); });
-document.getElementById('listingModal')?.addEventListener('click', e => { if (e.target === document.getElementById('listingModal')) closeListingModal(); });
-document.getElementById('qrModal')?.addEventListener('click', e => { if (e.target === document.getElementById('qrModal')) closeQRModal(); });
+<!-- SLIDE TO PAY MODAL -->
+<div class="modal-overlay" id="slideModal">
+  <div class="modal-sheet" style="max-width:400px">
+    <div class="modal-close" onclick="closeSlideModal()"><i class="ti ti-x"></i></div>
+    <div class="modal-title" id="slideTitle">Buy Skin</div>
+    <div style="text-align:center;margin-bottom:24px">
+      <div style="font-size:48px;margin-bottom:8px">&#10024;</div>
+      <div style="font-size:14px;color:var(--text-muted)">Slide to confirm your purchase</div>
+      <div style="font-size:28px;font-weight:900;color:var(--gold);margin-top:12px" id="slidePrice">0 GB</div>
+    </div>
+    <div class="slide-pay-wrap" id="slideWrap">
+      <div class="slide-track">
+        <div class="slide-thumb" id="slideThumb">&#8594;</div>
+        <div class="slide-text" id="slideTextEl">Slide to Confirm</div>
+      </div>
+    </div>
+    <div id="slideSuccess" style="display:none;text-align:center;padding:20px 0">
+      <div style="font-size:48px;margin-bottom:12px">&#127881;</div>
+      <div style="font-size:18px;font-weight:800;margin-bottom:6px">Frame Unlocked!</div>
+      <div style="font-size:13px;color:var(--text-muted)">Your new frame is ready to apply to any listing.</div>
+    </div>
+  </div>
+</div>
 
-// ── Expose functions to HTML onclick
-window.handleLogin = handleLogin;
-window.handleRegister = handleRegister;
-window.handleLogout = handleLogout;
-window.showLogin = showLogin;
-window.showRegister = showRegister;
-window.switchScreen = switchScreen;
-window.setChipFilter = setChipFilter;
-window.setMarketFilter = setMarketFilter;
-window.filterMarketplace = filterMarketplace;
-window.setPubFilter = setPubFilter;
-window.openListingModal = openListingModal;
-window.closeListingModal = closeListingModal;
-window.triggerUpload = triggerUpload;
-window.submitListing = submitListing;
-window.deleteListing = deleteListing;
-window.updateSpecFields = updateSpecFields;
-window.openSheet = openSheet;
-window.closeSheet = closeSheet;
-window.reserveItem = reserveItem;
-window.openQRModal = openQRModal;
-window.closeQRModal = closeQRModal;
-window.openSlideModal = openSlideModal;
-window.closeSlideModal = closeSlideModal;
-window.adminCreditGB = adminCreditGB;
-window.adminSettleDebt = adminSettleDebt;
-window.copyProfileLink = copyProfileLink;
-window.showToast = showToast;
+<!-- TOAST CONTAINER -->
+<div class="toast-wrap" id="toastWrap"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
