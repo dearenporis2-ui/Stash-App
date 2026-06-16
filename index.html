@@ -416,25 +416,38 @@
       </div>
       <div class="modal-group">
         <div class="modal-label">Category</div>
-        <select class="modal-input" id="listingCategory" onchange="updateSpecFields()">
-          <option value="">Select category</option>
-          <option>Watches</option>
-          <option>Sneakers</option>
-          <option>Tech</option>
-          <option>Jewelry</option>
-          <option>Cars</option>
-          <option>Bags</option>
-          <option>Parts Bin</option>
-          <option>Other</option>
-        </select>
+        <div class="custom-select-wrap" id="csCategory">
+          <input type="hidden" id="listingCategory" value="" />
+          <div class="cs-selected" onclick="toggleCS('csCategory')">
+            <span class="cs-placeholder" id="csCategoryLabel">Select category</span>
+            <i class="ti ti-chevron-down cs-arrow"></i>
+          </div>
+          <div class="cs-dropdown">
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Watches','⌚','updateSpecFields')"><span class="cs-opt-icon">⌚</span>Watches</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Sneakers','👟','updateSpecFields')"><span class="cs-opt-icon">👟</span>Sneakers</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Tech','💻','updateSpecFields')"><span class="cs-opt-icon">💻</span>Tech</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Jewelry','💍','updateSpecFields')"><span class="cs-opt-icon">💍</span>Jewelry</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Cars','🚗','updateSpecFields')"><span class="cs-opt-icon">🚗</span>Cars</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Bags','👜','updateSpecFields')"><span class="cs-opt-icon">👜</span>Bags</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Parts Bin','🔧','updateSpecFields')"><span class="cs-opt-icon">🔧</span>Parts Bin</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Other','📦','updateSpecFields')"><span class="cs-opt-icon">📦</span>Other</div>
+          </div>
+        </div>
       </div>
       <div class="modal-group">
         <div class="modal-label">Intent</div>
-        <select class="modal-input" id="listingIntent">
-          <option value="trade">Looking to Trade</option>
-          <option value="cash">Accepting Cash Offers</option>
-          <option value="grail">Personal Grail (View Only)</option>
-        </select>
+        <div class="custom-select-wrap" id="csIntent">
+          <input type="hidden" id="listingIntent" value="trade" />
+          <div class="cs-selected" onclick="toggleCS('csIntent')">
+            <span id="csIntentLabel">🔄 Looking to Trade</span>
+            <i class="ti ti-chevron-down cs-arrow"></i>
+          </div>
+          <div class="cs-dropdown">
+            <div class="cs-option selected" onclick="selectCS('csIntent','listingIntent','trade','🔄 Looking to Trade')"><span class="cs-opt-icon">🔄</span>Looking to Trade</div>
+            <div class="cs-option" onclick="selectCS('csIntent','listingIntent','cash','💰 Accepting Cash Offers')"><span class="cs-opt-icon">💰</span>Accepting Cash Offers</div>
+            <div class="cs-option" onclick="selectCS('csIntent','listingIntent','grail','👑 Personal Grail (View Only)')"><span class="cs-opt-icon">👑</span>Personal Grail (View Only)</div>
+          </div>
+        </div>
       </div>
       <div class="modal-group" style="grid-column:span 2" id="specFieldsWrap"></div>
       <div class="modal-group" style="grid-column:span 2">
@@ -443,7 +456,7 @@
       </div>
       <div class="modal-group" style="grid-column:span 2">
         <div class="modal-label">Card Frame</div>
-        <select class="modal-input" id="listingFrame">
+        <select class="modal-input" style="display:none" id="listingFrame">
           <option value="default">Default (Free)</option>
           <option value="gold">Liquid Gold Frame</option>
           <option value="holo">Holographic Foil</option>
