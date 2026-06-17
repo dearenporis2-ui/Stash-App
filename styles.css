@@ -430,9 +430,13 @@ textarea.modal-input { resize: vertical; min-height: 80px; }
   .stats-row { grid-template-columns: 1fr 1fr; }
   .admin-grid { grid-template-columns: 1fr; }
   .nw-value { font-size: 52px; }
-}
 
-@media (max-width: 768px) {
+
+  /* merged */
+  .stats-row { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .nw-value { font-size: 48px; letter-spacing: -2px; }
+  .nw-value .currency { font-size: 26px; }
+
 
   /* ── Mobile topbar ── */
   .topbar { display: none; }
