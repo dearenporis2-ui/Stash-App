@@ -277,15 +277,17 @@ function setupMobileNav() {
 async function loadDashboard() {
   if (!currentUser) return;
 
+  // No orderBy here to avoid needing a composite Firestore index
   const q = query(
     collection(db, 'listings'),
     where('sellerId', '==', currentUser.uid),
-    where('status', '==', 'active'),
-    orderBy('createdAt', 'desc')
+    where('status', '==', 'active')
   );
 
   const unsub = onSnapshot(q, (snap) => {
-    const listings = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const listings = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
     renderDashboard(listings);
   });
   unsubscribeListeners.push(unsub);
@@ -301,7 +303,14 @@ function renderDashboard(listings) {
   if (nwEl) animateCount(nwEl, total);
 
   const trendEl = document.getElementById('nwTrend');
-  if (trendEl) trendEl.textContent = `${listings.length} item${listings.length !== 1 ? 's' : ''} in your stash`;
+  if (trendEl) {
+    trendEl.textContent = listings.length === 0
+      ? 'No items yet — list your first item!'
+      : `${listings.length} item${listings.length !== 1 ? 's' : ''} in your stash`;
+    trendEl.style.color = 'var(--green)';
+    trendEl.style.background = 'var(--green-bg)';
+    trendEl.style.border = '1px solid var(--green-border)';
+  }
 
   setText('dashTotalItems', listings.length);
 
@@ -406,17 +415,18 @@ function renderPortfolioGrid(listings) {
 // MARKETPLACE
 // ═══════════════════════════════════════════
 async function loadMarketplace() {
+  // No orderBy to avoid composite index requirement
   const q = query(
     collection(db, 'listings'),
     where('status', '==', 'active'),
-    orderBy('createdAt', 'desc'),
     limit(50)
   );
 
   const unsub = onSnapshot(q, (snap) => {
     marketListings = snap.docs
       .map(d => ({ id: d.id, ...d.data() }))
-      .filter(l => l.sellerId !== currentUser?.uid); // exclude own listings
+      .filter(l => l.sellerId !== currentUser?.uid)
+      .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
     renderMarketplace();
   });
   unsubscribeListeners.push(unsub);
@@ -567,7 +577,11 @@ function setPubFilter(el, intent) {
 
 async function loadPortfolioListings() {
   if (!currentUser) return;
-  const q = query(collection(db, 'listings'), where('sellerId', '==', currentUser.uid), where('status', '==', 'active'));
+  const q = query(
+    collection(db, 'listings'),
+    where('sellerId', '==', currentUser.uid),
+    where('status', '==', 'active')
+  );
   const snap = await getDocs(q);
   const listings = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   renderPortfolioGrid(listings);
