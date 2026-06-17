@@ -5,39 +5,38 @@ service cloud.firestore {
     // ─── Users ───
     match /users/{userId} {
       allow read: if request.auth != null;
-      allow write: if request.auth != null && request.auth.uid == userId;
+      allow create: if request.auth != null && request.auth.uid == userId;
+      allow update: if request.auth != null && request.auth.uid == userId;
     }
 
     // ─── Listings ───
+    // Anyone logged in can read, owner can write
     match /listings/{listingId} {
-      allow read: if true; // public
-      allow create: if request.auth != null
-        && !get(/databases/$(database)/documents/users/$(request.auth.uid)).data.accountLocked;
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
       allow update, delete: if request.auth != null
         && resource.data.sellerId == request.auth.uid;
     }
 
     // ─── Trades ───
     match /trades/{tradeId} {
-      allow read: if request.auth != null
-        && (resource.data.buyerId == request.auth.uid
-        || resource.data.sellerId == request.auth.uid);
+      allow read: if request.auth != null;
       allow create: if request.auth != null;
-      allow update: if false; // only Cloud Functions can update trades
+      allow update: if request.auth != null;
     }
 
     // ─── Gold Block Transactions ───
     match /gbTransactions/{txId} {
       allow read: if request.auth != null
         && resource.data.userId == request.auth.uid;
-      allow write: if false; // Cloud Functions only
+      allow create: if request.auth != null;
+      allow write: if false;
     }
 
     // ─── Debt Ledger ───
     match /debtLedger/{debtId} {
-      allow read: if request.auth != null
-        && resource.data.userId == request.auth.uid;
-      allow write: if false; // Cloud Functions only
+      allow read: if request.auth != null;
+      allow write: if false;
     }
 
     // ─── Admin ───
