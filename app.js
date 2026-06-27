@@ -1227,9 +1227,6 @@ function toggleMobileDrawer() {
   if (isOpen) {
     closeMobileDrawer();
   } else {
-    // Remove any inline display style so CSS takes over
-    drawer.style.removeProperty('display');
-    drawer.style.removeProperty('left');
     drawer.classList.add('open');
     overlay.classList.add('open');
     if (burger) burger.classList.add('open');
