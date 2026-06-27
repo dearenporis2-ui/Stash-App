@@ -1227,10 +1227,10 @@ function toggleMobileDrawer() {
   if (isOpen) {
     closeMobileDrawer();
   } else {
-    drawer.style.display = 'flex';
-    drawer.style.left = '0';
+    // Remove any inline display style so CSS takes over
+    drawer.style.removeProperty('display');
+    drawer.style.removeProperty('left');
     drawer.classList.add('open');
-    overlay.style.display = 'block';
     overlay.classList.add('open');
     if (burger) burger.classList.add('open');
     document.body.style.overflow = 'hidden';
@@ -1242,15 +1242,7 @@ function closeMobileDrawer() {
   const overlay = document.getElementById('mobileOverlay');
   const burger = document.getElementById('burgerBtn');
   if (!drawer) return;
-  drawer.style.left = '-300px';
-  // After animation ends, hide it
-  setTimeout(() => {
-    if (!drawer.classList.contains('open')) {
-      drawer.style.display = 'none';
-    }
-  }, 350);
   drawer.classList.remove('open');
-  overlay.style.display = 'none';
   overlay.classList.remove('open');
   if (burger) burger.classList.remove('open');
   document.body.style.overflow = '';
