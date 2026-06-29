@@ -479,6 +479,7 @@
                 <div class="pv-sub" id="portItemCount">0 items</div>
               </div>
               <div class="share-btn" onclick="copyProfileLink()"><i class="ti ti-share"></i> Share</div>
+              <div class="share-btn" onclick="openEditProfile()" style="border-color:rgba(212,160,23,0.4);color:#D4A017"><i class="ti ti-pencil"></i> Edit Profile</div>
             </div>
           </div>
           <div class="divider-line"></div>
@@ -722,6 +723,43 @@
       <div style="font-size:18px;font-weight:800;margin-bottom:6px">Frame Unlocked!</div>
       <div style="font-size:13px;color:var(--text-muted)">Your new frame is ready to apply to any listing.</div>
     </div>
+  </div>
+</div>
+
+
+<!-- EDIT PROFILE MODAL -->
+<div class="modal-overlay" id="editProfileModal">
+  <div class="modal-sheet" style="max-width:440px">
+    <div class="modal-close" onclick="closeEditProfile()"><i class="ti ti-x"></i></div>
+    <div class="modal-title">Edit Profile</div>
+    <div class="modal-group">
+      <div class="modal-label">Display Name</div>
+      <input class="modal-input" id="editDisplayName" type="text" placeholder="Your name" />
+    </div>
+    <div class="modal-group">
+      <div class="modal-label">Bio</div>
+      <textarea class="modal-input" id="editBio" rows="3" placeholder="Tell the community about yourself..."></textarea>
+    </div>
+    <div class="modal-group">
+      <div class="modal-label">Profile Photo</div>
+      <div id="profilePhotoPreview" onclick="triggerProfilePhotoUpload()" style="width:100%;height:100px;background:rgba(255,255,255,0.04);border:2px dashed rgba(255,255,255,0.1);border-radius:14px;display:flex;align-items:center;justify-content:center;cursor:pointer;gap:10px;transition:all 0.2s" onmouseover="this.style.borderColor='#D4A017'" onmouseout="this.style.borderColor='rgba(255,255,255,0.1)'">
+        <i class="ti ti-camera" style="font-size:24px;color:rgba(255,255,255,0.4)"></i>
+        <span style="font-size:13px;color:rgba(255,255,255,0.4)">Upload profile photo</span>
+      </div>
+      <input type="hidden" id="editAvatarUrl" />
+    </div>
+    <button class="modal-btn" onclick="saveProfile()">Save Profile</button>
+  </div>
+</div>
+
+<!-- CONFIRM DELETE MODAL -->
+<div class="modal-overlay" id="confirmDeleteModal">
+  <div class="modal-sheet" style="max-width:380px;text-align:center">
+    <div style="font-size:48px;margin-bottom:16px">🗑️</div>
+    <div class="modal-title" style="text-align:center">Remove Listing?</div>
+    <div style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:24px;line-height:1.6">This will permanently remove the item from your Stash and the marketplace.</div>
+    <button class="modal-btn" style="background:var(--red,#ff4d4d);margin-bottom:8px" onclick="confirmDelete()">Yes, Remove It</button>
+    <button class="modal-btn-ghost" onclick="closeConfirmDelete()">Cancel</button>
   </div>
 </div>
 
