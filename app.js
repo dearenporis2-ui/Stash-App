@@ -221,6 +221,60 @@ function setText(id, val) {
   if (el) el.textContent = val;
 }
 
+
+// ═══════════════════════════════════════════
+// NOTIFICATION SOUND SYSTEM
+// ═══════════════════════════════════════════
+const AudioContext = window.AudioContext || window.webkitAudioContext;
+
+function playNotificationSound(type = 'info') {
+  try {
+    const ctx = new AudioContext();
+
+    const sounds = {
+      success: [
+        { freq: 523.25, start: 0,    duration: 0.12, gain: 0.18 }, // C5
+        { freq: 659.25, start: 0.1,  duration: 0.12, gain: 0.16 }, // E5
+        { freq: 783.99, start: 0.2,  duration: 0.2,  gain: 0.14 }, // G5
+      ],
+      error: [
+        { freq: 311.13, start: 0,    duration: 0.15, gain: 0.18 }, // Eb4
+        { freq: 277.18, start: 0.14, duration: 0.25, gain: 0.15 }, // Db4
+      ],
+      info: [
+        { freq: 698.46, start: 0,    duration: 0.1,  gain: 0.14 }, // F5
+        { freq: 880.00, start: 0.09, duration: 0.18, gain: 0.12 }, // A5
+      ]
+    };
+
+    const notes = sounds[type] || sounds.info;
+
+    notes.forEach(({ freq, start, duration, gain }) => {
+      const osc = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+
+      osc.connect(gainNode);
+      gainNode.connect(ctx.destination);
+
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, ctx.currentTime + start);
+
+      // Smooth fade in and out for elegance
+      gainNode.gain.setValueAtTime(0, ctx.currentTime + start);
+      gainNode.gain.linearRampToValueAtTime(gain, ctx.currentTime + start + 0.04);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + duration);
+
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + duration + 0.05);
+    });
+
+    // Close context after all sounds finish
+    setTimeout(() => ctx.close(), 1000);
+  } catch (e) {
+    // Silently fail if audio not supported
+  }
+}
+
 // ═══════════════════════════════════════════
 // SCREEN SWITCHING
 // ═══════════════════════════════════════════
@@ -1198,6 +1252,7 @@ function copyProfileLink() {
 function showToast(msg, type = 'info') {
   const wrap = document.getElementById('toastWrap');
   if (!wrap) return;
+  playNotificationSound(type);
   const icons = { success:'ti-circle-check', error:'ti-circle-x', info:'ti-info-circle' };
   const colors = { success:'var(--green)', error:'var(--red)', info:'var(--gold)' };
   const toast = document.createElement('div');
