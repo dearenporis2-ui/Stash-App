@@ -37,13 +37,21 @@ let unsubscribeListeners = [];
 // ═══════════════════════════════════════════
 // LOADING SCREEN
 // ═══════════════════════════════════════════
+const LOADING_SCREEN_MIN_MS = 1800;
+const loadingScreenStartTime = Date.now();
+
 function hideLoadingScreen() {
   const screen = document.getElementById('loadingScreen');
   if (!screen) return;
-  screen.style.opacity = '0';
-  screen.style.transform = 'scale(1.02)';
-  screen.style.pointerEvents = 'none';
-  setTimeout(() => { screen.style.display = 'none'; }, 600);
+  const elapsed = Date.now() - loadingScreenStartTime;
+  const remaining = Math.max(0, LOADING_SCREEN_MIN_MS - elapsed);
+
+  setTimeout(() => {
+    screen.style.opacity = '0';
+    screen.style.transform = 'scale(1.02)';
+    screen.style.pointerEvents = 'none';
+    setTimeout(() => { screen.style.display = 'none'; }, 600);
+  }, remaining);
 }
 
 function showLoadingAnimation() {
@@ -472,7 +480,8 @@ function renderClosetCard(l) {
     : getCategoryEmoji(l.category);
   const intentTag = l.intent ? `<div class="intent-tag tag-${l.intent}" style="margin-top:6px">${getIntentLabel(l.intent)}</div>` : '';
   return `
-    <div class="closet-card">
+    <div class="closet-card" style="position:relative">
+      <div class="quick-edit-btn" style="top:10px;right:10px" onclick="openEditListing('${l.id}')"><i class="ti ti-pencil"></i></div>
       <div class="closet-img">${imgContent}</div>
       <div class="closet-name">${escHtml(l.name)}</div>
       <div class="closet-sub">${escHtml(l.category || '')}</div>
@@ -492,18 +501,16 @@ function renderPortfolioGrid(listings) {
     const frameClass = l.frame && l.frame !== 'default' ? `${l.frame}-frame` : '';
     const imgContent = l.imageUrl ? `<img src="${l.imageUrl}" style="width:100%;height:100%;object-fit:cover">` : getCategoryEmoji(l.category);
     const intentTag = `<div class="intent-tag tag-${l.intent || 'trade'}">${getIntentLabel(l.intent)}</div>`;
-    const btn = l.intent === 'grail'
-      ? `<button class="inquire-btn view-only">View</button>`
-      : `<button class="inquire-btn" onclick="openSheet('${l.id}')">Inquire</button>`;
     return `
-      <div class="p-card ${frameClass}" data-intent="${l.intent || 'trade'}">
+      <div class="p-card ${frameClass}" data-intent="${l.intent || 'trade'}" style="position:relative">
+        <div class="quick-edit-btn" onclick="openEditListing('${l.id}')"><i class="ti ti-pencil"></i></div>
         ${getFrameBadge(l.frame)}
         <div class="p-img">${imgContent}</div>
         <div class="item-name">${escHtml(l.name)}</div>
         <div class="item-sub">${escHtml(l.category || '')}</div>
         <div class="p-footer">
           <div><div class="p-value">SCR ${Number(l.priceSCR || 0).toLocaleString()}</div>${intentTag}</div>
-          ${btn}
+          <button class="inquire-btn" style="background:var(--glass-gold);color:var(--gold)" onclick="openEditListing('${l.id}')">Edit</button>
         </div>
       </div>`;
   }).join('');
@@ -516,14 +523,13 @@ async function loadMarketplace() {
   // No orderBy to avoid composite index requirement
   const q = query(
     collection(db, 'listings'),
-    where('status', '==', 'active'),
+    where('status', 'in', ['active', 'reserved']),
     limit(50)
   );
 
   const unsub = onSnapshot(q, (snap) => {
     marketListings = snap.docs
       .map(d => ({ id: d.id, ...d.data() }))
-      .filter(l => l.sellerId !== currentUser?.uid)
       .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
     renderMarketplace();
   });
@@ -556,23 +562,27 @@ function renderMarketplace() {
   }
 
   grid.innerHTML = filtered.map(l => {
+    const isMine = l.sellerId === currentUser?.uid;
     const imgContent = l.imageUrl
       ? `<img src="${l.imageUrl}" style="width:100%;height:100%;object-fit:cover">`
       : getCategoryEmoji(l.category);
     const statusTag = l.status === 'reserved'
       ? `<div class="intent-tag tag-reserved">Reserved</div>`
       : `<div class="intent-tag tag-${l.intent || 'trade'}">${getIntentLabel(l.intent)}</div>`;
+
+    const actionBtn = isMine
+      ? `<button class="reserve-btn" style="background:var(--glass-gold);color:var(--gold)" onclick="openEditListing('${l.id}')"><i class="ti ti-pencil" style="margin-right:4px"></i>Edit Listing</button>`
+      : `<button class="reserve-btn" onclick="openSheet('${l.id}')" ${l.status === 'reserved' ? 'disabled' : ''}>${l.status === 'reserved' ? 'Reserved' : 'Inquire / Reserve'}</button>`;
+
     return `
-      <div class="listing-card">
-        <div class="listing-img">${imgContent}</div>
+      <div class="listing-card" style="${isMine ? 'border-color:rgba(212,160,23,0.35)' : ''}">
+        <div class="listing-img" style="position:relative">${imgContent}${isMine ? '<div style="position:absolute;top:8px;right:8px;background:rgba(212,160,23,0.9);color:#080809;font-size:10px;font-weight:800;padding:3px 8px;border-radius:6px">YOURS</div>' : ''}</div>
         <div class="listing-name">${escHtml(l.name)}</div>
-        <div class="listing-seller">by @${escHtml(l.sellerUsername || 'unknown')}</div>
+        <div class="listing-seller">by @${escHtml(l.sellerUsername || 'unknown')}${isMine ? ' (you)' : ''}</div>
         <div class="listing-price">SCR ${Number(l.priceSCR || 0).toLocaleString()}</div>
         ${statusTag}
         <div class="listing-footer" style="margin-top:10px">
-          <button class="reserve-btn" onclick="openSheet('${l.id}')" ${l.status === 'reserved' ? 'disabled' : ''}>
-            ${l.status === 'reserved' ? 'Reserved' : 'Inquire / Reserve'}
-          </button>
+          ${actionBtn}
         </div>
       </div>`;
   }).join('');
@@ -732,12 +742,70 @@ function updateSpecFields() {
     `).join('')}`;
 }
 
+let editingListingId = null;
+
 function openListingModal() {
+  editingListingId = null;
+  document.querySelector('#listingModal .modal-title').textContent = 'List an Item';
+  document.querySelector('#listingModal .modal-btn').textContent = 'List Item ✦';
+  document.getElementById('listingModal').classList.add('open');
+}
+
+async function openEditListing(listingId) {
+  const snap = await getDoc(doc(db, 'listings', listingId));
+  if (!snap.exists()) return showToast('Listing not found', 'error');
+  const l = snap.data();
+
+  editingListingId = listingId;
+  document.querySelector('#listingModal .modal-title').textContent = 'Edit Listing';
+  document.querySelector('#listingModal .modal-btn').textContent = 'Save Changes ✦';
+
+  document.getElementById('listingName').value = l.name || '';
+  document.getElementById('listingPrice').value = l.priceSCR || '';
+  document.getElementById('listingDesc').value = l.description || '';
+  document.getElementById('listingImageUrl').value = l.imageUrl || '';
+  document.getElementById('listingWhatsApp').value = l.whatsapp || '';
+  document.getElementById('listingInstagram').value = l.instagram || '';
+  document.getElementById('listingPinned').checked = !!l.pinned;
+
+  // Set category via custom dropdown
+  if (l.category) {
+    const catEmoji = { Watches:'⌚', Sneakers:'👟', Tech:'💻', Jewelry:'💍', Cars:'🚗', Bags:'👜', 'Parts Bin':'🔧', Other:'📦' };
+    selectCS('csCategory', 'listingCategory', l.category, (catEmoji[l.category]||'📦') + ' ' + l.category);
+    updateSpecFields();
+    // Fill spec fields after they render
+    setTimeout(() => {
+      if (l.specs) {
+        Object.keys(l.specs).forEach(key => {
+          const el = document.getElementById(key);
+          if (el) el.value = l.specs[key];
+        });
+      }
+    }, 50);
+  }
+
+  // Set intent via custom dropdown
+  const intentLabels = { trade: '🔄 Looking to Trade', cash: '💰 Accepting Cash Offers', grail: '👑 Personal Grail (View Only)' };
+  selectCS('csIntent', 'listingIntent', l.intent || 'trade', intentLabels[l.intent || 'trade']);
+
+  // Set frame via custom dropdown
+  const frameLabels = { default: '⬜ Default (Free)', gold: '🟨 Liquid Gold Frame', holo: '🌈 Holographic Foil', purple: '💜 Royal Purple', carbon: '🖤 Carbon Fiber', neon: '💚 Neon Grid' };
+  selectCS('csFrame', 'listingFrame', l.frame || 'default', frameLabels[l.frame || 'default']);
+
+  // Image preview
+  const preview = document.getElementById('uploadPreview');
+  if (preview) {
+    preview.innerHTML = l.imageUrl
+      ? `<img src="${l.imageUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:12px">`
+      : `<i class="ti ti-photo-up" style="font-size:32px;color:var(--text-muted);margin-bottom:8px"></i><div style="font-size:13px;color:var(--text-muted)">Click to upload photo</div>`;
+  }
+
   document.getElementById('listingModal').classList.add('open');
 }
 
 function closeListingModal() {
   document.getElementById('listingModal').classList.remove('open');
+  editingListingId = null;
   // Reset form
   ['listingName','listingPrice','listingDesc','listingImageUrl','listingWhatsApp','listingInstagram'].forEach(id => {
     const el = document.getElementById(id);
@@ -790,29 +858,41 @@ async function submitListing() {
     if (el && el.value) specs[f.id] = el.value.trim();
   });
 
+  const listingData = {
+    name,
+    priceSCR: price,
+    category,
+    intent,
+    frame,
+    description: desc,
+    imageUrl: imageUrl || '',
+    specs,
+    pinned,
+    whatsapp: whatsapp || '',
+    instagram: instagram || ''
+  };
+
   try {
-    await addDoc(collection(db, 'listings'), {
-      name,
-      priceSCR: price,
-      category,
-      intent,
-      frame,
-      description: desc,
-      imageUrl: imageUrl || '',
-      specs,
-      pinned,
-      whatsapp: whatsapp || '',
-      instagram: instagram || '',
-      sellerId: currentUser.uid,
-      sellerUsername: currentUserData.username,
-      sellerDisplayName: currentUserData.displayName || currentUserData.username,
-      status: 'active',
-      createdAt: serverTimestamp()
-    });
-    closeListingModal();
-    showToast('Item listed successfully!', 'success');
+    if (editingListingId) {
+      // EDIT MODE — update existing listing
+      await updateDoc(doc(db, 'listings', editingListingId), listingData);
+      closeListingModal();
+      showToast('Listing updated!', 'success');
+    } else {
+      // CREATE MODE — new listing
+      await addDoc(collection(db, 'listings'), {
+        ...listingData,
+        sellerId: currentUser.uid,
+        sellerUsername: currentUserData.username,
+        sellerDisplayName: currentUserData.displayName || currentUserData.username,
+        status: 'active',
+        createdAt: serverTimestamp()
+      });
+      closeListingModal();
+      showToast('Item listed successfully!', 'success');
+    }
   } catch (err) {
-    showToast('Error listing item: ' + err.message, 'error');
+    showToast('Error saving listing: ' + err.message, 'error');
   }
 }
 
@@ -1551,6 +1631,7 @@ window.setMarketFilter = setMarketFilter;
 window.filterMarketplace = filterMarketplace;
 window.setPubFilter = setPubFilter;
 window.openListingModal = openListingModal;
+window.openEditListing = openEditListing;
 window.closeListingModal = closeListingModal;
 window.triggerUpload = triggerUpload;
 window.submitListing = submitListing;
