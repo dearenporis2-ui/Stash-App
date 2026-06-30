@@ -380,6 +380,13 @@ const topbarTitles = {
 
 function switchScreen(id) {
   if (id === currentScreen) return;
+
+  // Hard block — only the verified admin account can ever see this screen
+  if (id === 'admin' && !currentUserData?.isAdmin) {
+    showToast('Access denied', 'error');
+    return;
+  }
+
   const leaving = document.getElementById('screen-' + currentScreen);
   const entering = document.getElementById('screen-' + id);
   if (!entering) return;
