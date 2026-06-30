@@ -14,7 +14,7 @@ import {
 import {
   doc, getDoc, setDoc, updateDoc, addDoc, deleteDoc,
   collection, query, where, orderBy, limit,
-  onSnapshot, getDocs, serverTimestamp, increment
+  onSnapshot, getDocs, serverTimestamp, increment, arrayUnion
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import {
   getFunctions, httpsCallable
@@ -137,6 +137,7 @@ async function handleRegister() {
       accountLocked: false,
       pendingDebt: 0,
       isAdmin: false,
+      ownedFrames: ['default'],
       createdAt: serverTimestamp()
     });
     showToast('Welcome to Stash!', 'success');
@@ -245,6 +246,45 @@ function updateUserUI() {
   updatePortfolioUI();
   // Mobile drawer
   updateDrawerUI();
+  // Refresh exotic shop owned badges whenever user data changes
+  refreshShopOwnership();
+}
+
+function refreshShopOwnership() {
+  const owned = currentUserData?.ownedFrames || ['default'];
+  const shopFrames = [
+    { id: 'gold', btnId: 'buyBtnGold' },
+    { id: 'holo', btnId: 'buyBtnHolo' },
+    { id: 'purple', btnId: 'buyBtnPurple' },
+    { id: 'carbon', btnId: 'buyBtnCarbon' },
+    { id: 'neon', btnId: 'buyBtnNeon' }
+  ];
+  shopFrames.forEach(({ id, btnId }) => {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    const card = btn.closest('.skin-card');
+    if (owned.includes(id)) {
+      btn.textContent = 'Owned ✓';
+      btn.style.background = 'rgba(46,204,113,0.15)';
+      btn.style.color = '#2ecc71';
+      btn.style.cursor = 'default';
+      if (card && !card.querySelector('.owned-ribbon')) {
+        const ribbon = document.createElement('div');
+        ribbon.className = 'owned-ribbon';
+        ribbon.style.cssText = 'position:absolute;top:12px;left:12px;background:rgba(46,204,113,0.9);color:#080809;font-size:10px;font-weight:800;padding:4px 10px;border-radius:6px;z-index:2';
+        ribbon.textContent = 'OWNED';
+        if (card.style.position !== 'relative') card.style.position = 'relative';
+        card.prepend(ribbon);
+      }
+    } else {
+      btn.textContent = 'Buy Now';
+      btn.style.background = '';
+      btn.style.color = '';
+      btn.style.cursor = 'pointer';
+      const ribbon = card?.querySelector('.owned-ribbon');
+      if (ribbon) ribbon.remove();
+    }
+  });
 }
 
 function updatePortfolioUI() {
@@ -748,7 +788,49 @@ function openListingModal() {
   editingListingId = null;
   document.querySelector('#listingModal .modal-title').textContent = 'List an Item';
   document.querySelector('#listingModal .modal-btn').textContent = 'List Item ✦';
+  refreshFrameDropdownOwnership();
   document.getElementById('listingModal').classList.add('open');
+}
+
+function refreshFrameDropdownOwnership() {
+  const owned = currentUserData?.ownedFrames || ['default'];
+  const frameMap = {
+    default: { label: '⬜ Default (Free)', emoji: '⬜' },
+    gold: { label: '🟨 Liquid Gold Frame', emoji: '🟨' },
+    holo: { label: '🌈 Holographic Foil', emoji: '🌈' },
+    purple: { label: '💜 Royal Purple', emoji: '💜' },
+    carbon: { label: '🖤 Carbon Fiber', emoji: '🖤' },
+    neon: { label: '💚 Neon Grid', emoji: '💚' }
+  };
+  const dropdown = document.querySelector('#csFrame .cs-dropdown');
+  if (!dropdown) return;
+
+  dropdown.querySelectorAll('.cs-option').forEach(opt => {
+    const onclickAttr = opt.getAttribute('onclick') || '';
+    const match = onclickAttr.match(/'([a-z]+)',/);
+    if (!match) return;
+    const frameId = match[1];
+    const isOwned = owned.includes(frameId);
+
+    if (!isOwned) {
+      opt.style.opacity = '0.35';
+      opt.style.pointerEvents = 'none';
+      opt.setAttribute('data-locked', 'true');
+      if (!opt.querySelector('.cs-lock-badge')) {
+        const badge = document.createElement('span');
+        badge.className = 'cs-lock-badge';
+        badge.style.cssText = 'margin-left:auto;font-size:10px;color:var(--text-muted);display:flex;align-items:center;gap:3px';
+        badge.innerHTML = '<i class="ti ti-lock" style="font-size:12px"></i> Shop';
+        opt.appendChild(badge);
+      }
+    } else {
+      opt.style.opacity = '1';
+      opt.style.pointerEvents = 'auto';
+      opt.removeAttribute('data-locked');
+      const badge = opt.querySelector('.cs-lock-badge');
+      if (badge) badge.remove();
+    }
+  });
 }
 
 async function openEditListing(listingId) {
@@ -791,6 +873,7 @@ async function openEditListing(listingId) {
   // Set frame via custom dropdown
   const frameLabels = { default: '⬜ Default (Free)', gold: '🟨 Liquid Gold Frame', holo: '🌈 Holographic Foil', purple: '💜 Royal Purple', carbon: '🖤 Carbon Fiber', neon: '💚 Neon Grid' };
   selectCS('csFrame', 'listingFrame', l.frame || 'default', frameLabels[l.frame || 'default']);
+  refreshFrameDropdownOwnership();
 
   // Image preview
   const preview = document.getElementById('uploadPreview');
@@ -1191,23 +1274,42 @@ async function getDeviceId() {
 // ═══════════════════════════════════════════
 let slideSkinName = '';
 let slideSkinCost = 0;
+let slideFrameId = '';
 
-function openSlideModal(name, cost) {
+function openSlideModal(name, cost, frameId) {
   slideSkinName = name;
   slideSkinCost = cost;
+  slideFrameId = frameId;
+
+  const ownedFrames = currentUserData?.ownedFrames || ['default'];
+  if (ownedFrames.includes(frameId)) {
+    showToast('You already own this frame!', 'info');
+    return;
+  }
+
   setText('slideTitle', name);
   setText('slidePrice', cost.toLocaleString() + ' GB');
+
+  document.getElementById('slideAlreadyOwned').style.display = 'none';
+  document.getElementById('slidePurchaseFlow').style.display = 'block';
   document.getElementById('slideWrap').style.display = '';
   document.getElementById('slideSuccess').style.display = 'none';
   document.getElementById('slideThumb').style.transform = 'translateX(0)';
+  document.getElementById('slideThumb').innerHTML = '→';
   setText('slideTextEl', 'Slide to Confirm');
   document.getElementById('slideTextEl').style.opacity = '1';
-  document.getElementById('slideModal').classList.add('open');
   initSlide();
+
+  document.getElementById('slideModal').classList.add('open');
 }
 
 function closeSlideModal() {
   document.getElementById('slideModal').classList.remove('open');
+  const canvas = document.getElementById('particleCanvas');
+  if (canvas) {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
 }
 
 function initSlide() {
@@ -1215,51 +1317,124 @@ function initSlide() {
   const thumb = document.getElementById('slideThumb');
   const textEl = document.getElementById('slideTextEl');
   const track = wrap.querySelector('.slide-track');
-  let dragging = false, startX = 0;
-  const getMax = () => track.offsetWidth - thumb.offsetWidth;
-  const getCur = () => parseFloat(thumb.style.transform.replace('translateX(','')) || 0;
 
+  // Clone to strip any old listeners from previous opens
   const newWrap = wrap.cloneNode(true);
   wrap.parentNode.replaceChild(newWrap, wrap);
   const nw = document.getElementById('slideWrap');
   const nt = nw.querySelector('.slide-thumb');
   const ntxt = nw.querySelector('.slide-text');
+  const ntrack = nw.querySelector('.slide-track');
 
-  function onStart(e) { dragging = true; nt.style.transition = 'none'; startX = (e.touches ? e.touches[0].clientX : e.clientX) - getCurN(); }
-  function getCurN() { return parseFloat(nt.style.transform.replace('translateX(','')) || 0; }
+  let dragging = false;
+  let startX = 0;
+  let completed = false;
+
+  const getMax = () => ntrack.offsetWidth - nt.offsetWidth;
+  const getCurrentX = () => {
+    const t = nt.style.transform;
+    const match = t.match(/translateX\(([-\d.]+)px\)/);
+    return match ? parseFloat(match[1]) : 0;
+  };
+
+  function onStart(e) {
+    if (completed) return;
+    dragging = true;
+    nt.style.transition = 'none';
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    startX = clientX - getCurrentX();
+  }
+
   function onMove(e) {
-    if (!dragging) return; e.preventDefault();
-    const x = Math.max(0, Math.min((e.touches ? e.touches[0].clientX : e.clientX) - startX, getMax()));
+    if (!dragging || completed) return;
+    e.preventDefault();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const max = getMax();
+    let x = clientX - startX;
+    x = Math.max(0, Math.min(x, max));
     nt.style.transform = `translateX(${x}px)`;
-    ntxt.style.opacity = Math.max(0, 1 - (x / getMax()) * 1.5);
-    if (x >= getMax() * 0.92) onComplete();
+    ntxt.style.opacity = String(Math.max(0, 1 - (x / max) * 1.4));
+    if (x >= max * 0.9 && !completed) {
+      onComplete();
+    }
   }
+
   function onEnd() {
-    if (!dragging) return; dragging = false;
-    if (getCurN() < getMax() * 0.92) { nt.style.transition = 'transform 0.3s'; nt.style.transform = 'translateX(0)'; ntxt.style.opacity = '1'; }
+    if (!dragging || completed) return;
+    dragging = false;
+    const max = getMax();
+    if (getCurrentX() < max * 0.9) {
+      nt.style.transition = 'transform 0.3s cubic-bezier(0.4,0,0.2,1)';
+      nt.style.transform = 'translateX(0)';
+      ntxt.style.opacity = '1';
+    }
   }
+
   async function onComplete() {
-    dragging = false; nt.style.transition = 'transform 0.2s'; nt.style.transform = `translateX(${getMax()}px)`;
-    // Deduct GB and record purchase
-    if (currentUser && currentUserData) {
-      if (currentUserData.goldBlocks < slideSkinCost) {
-        showToast('Not enough Gold Blocks!', 'error');
-        closeSlideModal(); return;
-      }
-      try {
-        await updateDoc(doc(db, 'users', currentUser.uid), { goldBlocks: increment(-slideSkinCost) });
-        await addDoc(collection(db, 'gbTransactions'), {
-          userId: currentUser.uid, amount: -slideSkinCost,
-          type: 'skin_purchase', skinName: slideSkinName,
-          createdAt: serverTimestamp()
-        });
-        setTimeout(() => {
-          document.getElementById('slideWrap').style.display = 'none';
-          document.getElementById('slideSuccess').style.display = 'block';
-          setTimeout(closeSlideModal, 2000);
-        }, 300);
-        showToast(`${slideSkinName} unlocked!`, 'success');
-      } catch (err) { showToast('Purchase failed: ' + err.message, 'error'); closeSlideModal(); }
+    if (completed) return;
+    completed = true;
+    dragging = false;
+
+    const max = getMax();
+    nt.style.transition = 'transform 0.2s ease';
+    nt.style.transform = `translateX(${max}px)`;
+    nt.innerHTML = '✓';
+
+    if (!currentUser || !currentUserData) {
+      showToast('You must be logged in', 'error');
+      completed = false;
+      return;
+    }
+
+    // Double-check ownership server-side before charging (prevents duplicate buys)
+    if ((currentUserData.ownedFrames || []).includes(slideFrameId)) {
+      showToast('You already own this frame!', 'info');
+      closeSlideModal();
+      return;
+    }
+
+    if (currentUserData.goldBlocks < slideSkinCost) {
+      showToast('Not enough Gold Blocks!', 'error');
+      setTimeout(() => {
+        nt.style.transition = 'transform 0.3s';
+        nt.style.transform = 'translateX(0)';
+        nt.innerHTML = '→';
+        ntxt.style.opacity = '1';
+        completed = false;
+      }, 600);
+      return;
+    }
+
+    try {
+      await updateDoc(doc(db, 'users', currentUser.uid), {
+        goldBlocks: increment(-slideSkinCost),
+        ownedFrames: arrayUnion(slideFrameId)
+      });
+      await addDoc(collection(db, 'gbTransactions'), {
+        userId: currentUser.uid,
+        amount: -slideSkinCost,
+        type: 'skin_purchase',
+        skinName: slideSkinName,
+        frameId: slideFrameId,
+        createdAt: serverTimestamp()
+      });
+
+      fireParticleBurst();
+
+      setTimeout(() => {
+        document.getElementById('slideWrap').style.display = 'none';
+        document.getElementById('slideSuccess').style.display = 'block';
+        setTimeout(closeSlideModal, 2200);
+      }, 250);
+
+      showToast(`${slideSkinName} unlocked!`, 'success');
+    } catch (err) {
+      showToast('Purchase failed: ' + err.message, 'error');
+      nt.style.transition = 'transform 0.3s';
+      nt.style.transform = 'translateX(0)';
+      nt.innerHTML = '→';
+      ntxt.style.opacity = '1';
+      completed = false;
     }
   }
 
@@ -1269,6 +1444,85 @@ function initSlide() {
   window.addEventListener('touchmove', onMove, { passive: false });
   window.addEventListener('mouseup', onEnd);
   window.addEventListener('touchend', onEnd);
+}
+
+// ═══════════════════════════════════════════
+// PARTICLE BURST EFFECT (canvas confetti)
+// ═══════════════════════════════════════════
+function fireParticleBurst() {
+  const canvas = document.getElementById('particleCanvas');
+  if (!canvas) return;
+  const modal = canvas.closest('.modal-sheet');
+  const rect = modal.getBoundingClientRect();
+  canvas.width = rect.width;
+  canvas.height = rect.height;
+  const ctx = canvas.getContext('2d');
+
+  const colors = ['#D4A017', '#F5C842', '#FFD700', '#fff', '#FFA500'];
+  const particles = [];
+  const count = 60;
+  const originX = rect.width / 2;
+  const originY = rect.height / 2;
+
+  for (let i = 0; i < count; i++) {
+    const angle = (Math.PI * 2 * i) / count + Math.random() * 0.5;
+    const speed = 3 + Math.random() * 6;
+    particles.push({
+      x: originX,
+      y: originY,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 2,
+      size: 3 + Math.random() * 4,
+      color: colors[Math.floor(Math.random() * colors.length)],
+      life: 1,
+      decay: 0.012 + Math.random() * 0.012,
+      rotation: Math.random() * Math.PI * 2,
+      rotSpeed: (Math.random() - 0.5) * 0.3,
+      shape: Math.random() > 0.5 ? 'square' : 'circle'
+    });
+  }
+
+  let frame = 0;
+  const maxFrames = 120;
+
+  function animate() {
+    frame++;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    let alive = false;
+    particles.forEach(p => {
+      if (p.life <= 0) return;
+      alive = true;
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.15; // gravity
+      p.vx *= 0.99;
+      p.life -= p.decay;
+      p.rotation += p.rotSpeed;
+
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rotation);
+      ctx.fillStyle = p.color;
+      if (p.shape === 'square') {
+        ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
+      } else {
+        ctx.beginPath();
+        ctx.arc(0, 0, p.size / 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    });
+
+    if (alive && frame < maxFrames) {
+      requestAnimationFrame(animate);
+    } else {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+  }
+
+  requestAnimationFrame(animate);
 }
 
 // ═══════════════════════════════════════════
