@@ -461,11 +461,11 @@
           </div>
           <div class="section-header"><div class="section-title">🎁 Current Drop</div><div class="section-line"></div><div class="section-count">5 Items</div></div>
           <div class="shop-grid">
-            <div class="skin-card skin-gold"><div class="skin-preview gold-p"><div class="limited-badge">LIMITED</div>⌚</div><div class="skin-name">Liquid Gold Frame</div><div class="skin-desc">High-gloss metallic gold border that reflects light. The ultimate flex for luxury timepieces.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>850 GB</div><button class="buy-btn" onclick="openSlideModal('Liquid Gold Frame',850)">Buy Now</button></div></div>
-            <div class="skin-card skin-holo"><div class="skin-preview holo-p"><div class="limited-badge">HOT</div>👟</div><div class="skin-name">Holographic Foil Frame</div><div class="skin-desc">Iridescent color-shifting gradient that reacts to cursor movement and device tilt.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>1,200 GB</div><button class="buy-btn" onclick="openSlideModal('Holographic Foil Frame',1200)">Buy Now</button></div></div>
-            <div class="skin-card skin-purple"><div class="skin-preview purple-p">💍</div><div class="skin-name">Royal Purple Frame</div><div class="skin-desc">A deep purple glow reserved for your rarest grail items.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>600 GB</div><button class="buy-btn" onclick="openSlideModal('Royal Purple Frame',600)">Buy Now</button></div></div>
-            <div class="skin-card skin-carbon"><div class="skin-preview carbon-p">💻</div><div class="skin-name">Carbon Fiber Frame</div><div class="skin-desc">Textured dark-weave border for tech, gaming rigs, and cars.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>400 GB</div><button class="buy-btn" onclick="openSlideModal('Carbon Fiber Frame',400)">Buy Now</button></div></div>
-            <div class="skin-card skin-neon"><div class="skin-preview neon-p"><div class="limited-badge">NEW</div>🎮</div><div class="skin-name">Neon Grid Frame</div><div class="skin-desc">Glowing pulsing cyber-lines for gaming and retro-modern tech collections.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>750 GB</div><button class="buy-btn" onclick="openSlideModal('Neon Grid Frame',750)">Buy Now</button></div></div>
+            <div class="skin-card skin-gold"><div class="skin-preview gold-p"><div class="limited-badge">LIMITED</div>⌚</div><div class="skin-name">Liquid Gold Frame</div><div class="skin-desc">High-gloss metallic gold border that reflects light. The ultimate flex for luxury timepieces.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>850 GB</div><button class="buy-btn" onclick="openSlideModal('Liquid Gold Frame',850,'gold')" id="buyBtnGold">Buy Now</button></div></div>
+            <div class="skin-card skin-holo"><div class="skin-preview holo-p"><div class="limited-badge">HOT</div>👟</div><div class="skin-name">Holographic Foil Frame</div><div class="skin-desc">Iridescent color-shifting gradient that reacts to cursor movement and device tilt.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>1,200 GB</div><button class="buy-btn" onclick="openSlideModal('Holographic Foil Frame',1200,'holo')" id="buyBtnHolo">Buy Now</button></div></div>
+            <div class="skin-card skin-purple"><div class="skin-preview purple-p">💍</div><div class="skin-name">Royal Purple Frame</div><div class="skin-desc">A deep purple glow reserved for your rarest grail items.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>600 GB</div><button class="buy-btn" onclick="openSlideModal('Royal Purple Frame',600,'purple')" id="buyBtnPurple">Buy Now</button></div></div>
+            <div class="skin-card skin-carbon"><div class="skin-preview carbon-p">💻</div><div class="skin-name">Carbon Fiber Frame</div><div class="skin-desc">Textured dark-weave border for tech, gaming rigs, and cars.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>400 GB</div><button class="buy-btn" onclick="openSlideModal('Carbon Fiber Frame',400,'carbon')" id="buyBtnCarbon">Buy Now</button></div></div>
+            <div class="skin-card skin-neon"><div class="skin-preview neon-p"><div class="limited-badge">NEW</div>🎮</div><div class="skin-name">Neon Grid Frame</div><div class="skin-desc">Glowing pulsing cyber-lines for gaming and retro-modern tech collections.</div><div class="skin-footer"><div class="skin-price"><span class="gb-icon">🟨</span>750 GB</div><button class="buy-btn" onclick="openSlideModal('Neon Grid Frame',750,'neon')" id="buyBtnNeon">Buy Now</button></div></div>
           </div>
           <div class="section-header" style="margin-top:32px"><div class="section-title">🟨 Buy Gold Blocks</div><div class="section-line"></div></div>
           <div class="stats-row">
@@ -690,14 +690,21 @@
       </div>
       <div class="modal-group" style="grid-column:span 2">
         <div class="modal-label">Card Frame</div>
-        <select class="modal-input" style="display:none" id="listingFrame">
-          <option value="default">Default (Free)</option>
-          <option value="gold">Liquid Gold Frame</option>
-          <option value="holo">Holographic Foil</option>
-          <option value="purple">Royal Purple</option>
-          <option value="carbon">Carbon Fiber</option>
-          <option value="neon">Neon Grid</option>
-        </select>
+        <div class="custom-select-wrap" id="csFrame">
+          <input type="hidden" id="listingFrame" value="default" />
+          <div class="cs-selected" onclick="toggleCS('csFrame')">
+            <span id="csFrameLabel">⬜ Default (Free)</span>
+            <i class="ti ti-chevron-down cs-arrow"></i>
+          </div>
+          <div class="cs-dropdown">
+            <div class="cs-option selected" onclick="selectCS('csFrame','listingFrame','default','⬜ Default (Free)')"><span class="cs-opt-icon">⬜</span>Default (Free)</div>
+            <div class="cs-option" onclick="selectCS('csFrame','listingFrame','gold','🟨 Liquid Gold Frame')"><span class="cs-opt-icon">🟨</span>Liquid Gold Frame</div>
+            <div class="cs-option" onclick="selectCS('csFrame','listingFrame','holo','🌈 Holographic Foil')"><span class="cs-opt-icon">🌈</span>Holographic Foil</div>
+            <div class="cs-option" onclick="selectCS('csFrame','listingFrame','purple','💜 Royal Purple')"><span class="cs-opt-icon">💜</span>Royal Purple</div>
+            <div class="cs-option" onclick="selectCS('csFrame','listingFrame','carbon','🖤 Carbon Fiber')"><span class="cs-opt-icon">🖤</span>Carbon Fiber</div>
+            <div class="cs-option" onclick="selectCS('csFrame','listingFrame','neon','💚 Neon Grid')"><span class="cs-opt-icon">💚</span>Neon Grid</div>
+          </div>
+        </div>
       </div>
       <div class="modal-group" style="grid-column:span 2;display:flex;align-items:center;gap:10px">
         <input type="checkbox" id="listingPinned" style="width:18px;height:18px;accent-color:var(--gold)" />
@@ -802,24 +809,32 @@
 
 <!-- SLIDE TO PAY MODAL -->
 <div class="modal-overlay" id="slideModal">
-  <div class="modal-sheet" style="max-width:400px">
+  <div class="modal-sheet" style="max-width:400px;position:relative;overflow:hidden">
+    <canvas id="particleCanvas" style="position:absolute;inset:0;pointer-events:none;z-index:5"></canvas>
     <div class="modal-close" onclick="closeSlideModal()"><i class="ti ti-x"></i></div>
     <div class="modal-title" id="slideTitle">Buy Skin</div>
-    <div style="text-align:center;margin-bottom:24px">
-      <div style="font-size:48px;margin-bottom:8px">&#10024;</div>
-      <div style="font-size:14px;color:var(--text-muted)">Slide to confirm your purchase</div>
-      <div style="font-size:28px;font-weight:900;color:var(--gold);margin-top:12px" id="slidePrice">0 GB</div>
+    <div id="slideAlreadyOwned" style="display:none;text-align:center;padding:30px 0">
+      <div style="font-size:48px;margin-bottom:12px">✅</div>
+      <div style="font-size:18px;font-weight:800;margin-bottom:6px">Already Unlocked</div>
+      <div style="font-size:13px;color:var(--text-muted)">You already own this frame — apply it to any listing when you list or edit an item.</div>
     </div>
-    <div class="slide-pay-wrap" id="slideWrap">
-      <div class="slide-track">
-        <div class="slide-thumb" id="slideThumb">&#8594;</div>
-        <div class="slide-text" id="slideTextEl">Slide to Confirm</div>
+    <div id="slidePurchaseFlow">
+      <div style="text-align:center;margin-bottom:24px">
+        <div style="font-size:48px;margin-bottom:8px">&#10024;</div>
+        <div style="font-size:14px;color:var(--text-muted)">Slide to confirm your purchase</div>
+        <div style="font-size:28px;font-weight:900;color:var(--gold);margin-top:12px" id="slidePrice">0 GB</div>
       </div>
-    </div>
-    <div id="slideSuccess" style="display:none;text-align:center;padding:20px 0">
-      <div style="font-size:48px;margin-bottom:12px">&#127881;</div>
-      <div style="font-size:18px;font-weight:800;margin-bottom:6px">Frame Unlocked!</div>
-      <div style="font-size:13px;color:var(--text-muted)">Your new frame is ready to apply to any listing.</div>
+      <div class="slide-pay-wrap" id="slideWrap">
+        <div class="slide-track">
+          <div class="slide-thumb" id="slideThumb">&#8594;</div>
+          <div class="slide-text" id="slideTextEl">Slide to Confirm</div>
+        </div>
+      </div>
+      <div id="slideSuccess" style="display:none;text-align:center;padding:20px 0">
+        <div style="font-size:48px;margin-bottom:12px">&#127881;</div>
+        <div style="font-size:18px;font-weight:800;margin-bottom:6px">Frame Unlocked!</div>
+        <div style="font-size:13px;color:var(--text-muted)">Your new frame is ready to apply to any listing.</div>
+      </div>
     </div>
   </div>
 </div>
