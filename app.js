@@ -33,6 +33,28 @@ let marketListings = [];
 let currentSheetListing = null;
 let unsubscribeListeners = [];
 
+
+// ═══════════════════════════════════════════
+// LOADING SCREEN
+// ═══════════════════════════════════════════
+function hideLoadingScreen() {
+  const screen = document.getElementById('loadingScreen');
+  if (!screen) return;
+  screen.style.opacity = '0';
+  screen.style.transform = 'scale(1.02)';
+  screen.style.pointerEvents = 'none';
+  setTimeout(() => { screen.style.display = 'none'; }, 600);
+}
+
+function showLoadingAnimation() {
+  const logo = document.getElementById('loadingLogo');
+  const tagline = document.getElementById('loadingTagline');
+  const bar = document.getElementById('loadingBar');
+  if (logo) { logo.style.opacity = '1'; logo.style.transform = 'translateY(0)'; }
+  if (tagline) { tagline.style.opacity = '1'; }
+  if (bar) { setTimeout(() => { bar.style.width = '100%'; }, 100); }
+}
+
 // ═══════════════════════════════════════════
 // AUTH
 // ═══════════════════════════════════════════
@@ -47,7 +69,16 @@ onAuthStateChanged(auth, async (user) => {
     currentUserData = null;
     showAuth();
   }
+  hideLoadingScreen();
 });
+
+// Start the loading animation immediately
+showLoadingAnimation();
+
+// Safety fallback — never let the loading screen hang forever
+setTimeout(() => {
+  hideLoadingScreen();
+}, 5000);
 
 async function loadUserData(uid) {
   const snap = await getDoc(doc(db, 'users', uid));
