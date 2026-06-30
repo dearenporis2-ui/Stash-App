@@ -72,12 +72,19 @@ async function handleRegister() {
   if (!username || !email || !password) return showToast('Please fill in all fields', 'error');
   if (username.length < 3) return showToast('Username must be at least 3 characters', 'error');
 
+  let cred = null;
   try {
-    // Check username taken
-    const usernameSnap = await getDocs(query(collection(db, 'users'), where('username', '==', username)));
-    if (!usernameSnap.empty) return showToast('Username already taken', 'error');
+    // Create the auth account FIRST so we're authenticated for Firestore reads/writes
+    cred = await createUserWithEmailAndPassword(auth, email, password);
 
-    const cred = await createUserWithEmailAndPassword(auth, email, password);
+    // Now check username uniqueness (we're authenticated, so this read is allowed)
+    const usernameSnap = await getDocs(query(collection(db, 'users'), where('username', '==', username)));
+    if (!usernameSnap.empty) {
+      // Username taken — delete the auth account we just created and bail
+      await cred.user.delete();
+      return showToast('Username already taken', 'error');
+    }
+
     await setDoc(doc(db, 'users', cred.user.uid), {
       uid: cred.user.uid,
       username,
@@ -95,6 +102,10 @@ async function handleRegister() {
     });
     showToast('Welcome to Stash!', 'success');
   } catch (err) {
+    // Clean up auth account if something failed after it was created
+    if (cred && cred.user) {
+      try { await cred.user.delete(); } catch (e) {}
+    }
     showToast(err.message, 'error');
   }
 }
