@@ -1,108 +1,76 @@
-// ─────────────────────────────────────────────
 // functions/antiFraud.js
-// Anti-fraud checks for QR handshake verification
-// Runs server-side only — never exposed to client
-// ─────────────────────────────────────────────
-
+// Server-side checks for the QR handshake.
+// Note: GPS and device ID come from the client, so treat them as soft signals.
 const admin = require("firebase-admin");
 
-const VELOCITY_LIMIT_PER_PEER_PER_DAY = 1;
-const MAX_DAILY_TRADES = 10;
+const MAX_MEETUP_DISTANCE_M = 500;
+const MIN_MEETUP_DISTANCE_M = 1;
+const PAIR_LIMIT_PER_DAY = 1;
+const BUYER_DAILY_LIMIT = 10;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
-async function runAntiFraudChecks(buyerId, sellerId, scanData) {
+const MESSAGES = {
+  SELF_TRADE: "You can't trade with yourself.",
+  SAME_DEVICE: "Both accounts are on the same device.",
+  BUYER_LOCATION_MISSING: "Turn on location access so we can verify the meetup.",
+  SELLER_LOCATION_MISSING: "The seller's location wasn't shared. Ask them to reopen the QR screen.",
+  GPS_TOO_CLOSE: "Location check failed.",
+  GPS_TOO_FAR: "You two don't seem to be at the same place.",
+  PAIR_LIMIT: "You've already completed a trade with this person today.",
+  DAILY_LIMIT: "You've hit the daily trade limit."
+};
+
+async function runAntiFraudChecks({ buyerId, sellerId, buyerInfo, sellerInfo }) {
   const db = admin.firestore();
   const errors = [];
 
-  const [buyerSnap, sellerSnap] = await Promise.all([
-    db.collection("users").doc(buyerId).get(),
-    db.collection("users").doc(sellerId).get()
+  // 1. Self-trade
+  if (buyerId === sellerId) errors.push("SELF_TRADE");
+
+  // 2. Same device on both accounts
+  if (buyerInfo.deviceId && sellerInfo.deviceId && buyerInfo.deviceId === sellerInfo.deviceId) {
+    errors.push("SAME_DEVICE");
+  }
+
+  // 3. GPS: both sides required, must be near each other but not identical
+  if (!buyerInfo.gps) errors.push("BUYER_LOCATION_MISSING");
+  if (!sellerInfo.gps) errors.push("SELLER_LOCATION_MISSING");
+  if (buyerInfo.gps && sellerInfo.gps) {
+    const d = getDistanceMeters(
+      buyerInfo.gps.lat, buyerInfo.gps.lng,
+      sellerInfo.gps.lat, sellerInfo.gps.lng
+    );
+    if (d < MIN_MEETUP_DISTANCE_M) errors.push("GPS_TOO_CLOSE");
+    if (d > MAX_MEETUP_DISTANCE_M) errors.push("GPS_TOO_FAR");
+  }
+
+  // 4. Velocity (equality-only queries, so no composite index is needed)
+  const since = Date.now() - DAY_MS;
+  const recent = (snap) => snap.docs.filter(d => {
+    const t = d.data().completedAt;
+    return t && t.toMillis() >= since;
+  }).length;
+
+  const trades = db.collection("trades");
+  const [forward, reverse, mine] = await Promise.all([
+    trades.where("buyerId", "==", buyerId).where("sellerId", "==", sellerId)
+      .where("status", "==", "completed").get(),
+    trades.where("buyerId", "==", sellerId).where("sellerId", "==", buyerId)
+      .where("status", "==", "completed").get(),
+    trades.where("buyerId", "==", buyerId).where("status", "==", "completed").get()
   ]);
 
-  const buyer = buyerSnap.data();
-  const seller = sellerSnap.data();
-
-  // ─── 1. Device Fingerprint Check ───
-  // Block if same device is logged into both accounts
-  if (
-    scanData.buyerDeviceId &&
-    scanData.sellerDeviceId &&
-    scanData.buyerDeviceId === scanData.sellerDeviceId
-  ) {
-    errors.push("DEVICE_FINGERPRINT_MATCH");
-  }
-
-  // ─── 2. GPS Spatial Variance Check ───
-  // Both devices must be physically close but not identical coords
-  if (scanData.buyerGPS && scanData.sellerGPS) {
-    const distance = getDistanceMeters(
-      scanData.buyerGPS.lat, scanData.buyerGPS.lng,
-      scanData.sellerGPS.lat, scanData.sellerGPS.lng
-    );
-    if (distance < 1) {
-      // Exactly same GPS = same device spoofing
-      errors.push("GPS_ZERO_DISTANCE");
-    }
-    if (distance > 500) {
-      // More than 500m apart = not a real meetup
-      errors.push("GPS_TOO_FAR_APART");
-    }
-  }
-
-  // ─── 3. IP / Network Check ───
-  if (
-    scanData.buyerIP &&
-    scanData.sellerIP &&
-    scanData.buyerIP === scanData.sellerIP
-  ) {
-    errors.push("SHARED_IP_ADDRESS");
-  }
-
-  // Same WiFi BSSID = same router
-  if (
-    scanData.buyerBSSID &&
-    scanData.sellerBSSID &&
-    scanData.buyerBSSID === scanData.sellerBSSID
-  ) {
-    errors.push("SHARED_WIFI_NETWORK");
-  }
-
-  // ─── 4. Velocity Throttling ───
-  // Check if these two users already traded today
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-
-  const recentTradeSnap = await db.collection("trades")
-    .where("buyerId", "==", buyerId)
-    .where("sellerId", "==", sellerId)
-    .where("completedAt", ">=", todayStart)
-    .get();
-
-  if (recentTradeSnap.size >= VELOCITY_LIMIT_PER_PEER_PER_DAY) {
-    errors.push("VELOCITY_LIMIT_EXCEEDED");
-  }
-
-  // Check global daily trade cap
-  const globalTradesSnap = await db.collection("trades")
-    .where("buyerId", "==", buyerId)
-    .where("completedAt", ">=", todayStart)
-    .get();
-
-  if (globalTradesSnap.size >= MAX_DAILY_TRADES) {
-    errors.push("GLOBAL_DAILY_LIMIT_EXCEEDED");
-  }
-
-  // ─── 5. Self-trade Check ───
-  if (buyerId === sellerId) {
-    errors.push("SELF_TRADE_DETECTED");
-  }
+  if (recent(forward) + recent(reverse) >= PAIR_LIMIT_PER_DAY) errors.push("PAIR_LIMIT");
+  if (recent(mine) >= BUYER_DAILY_LIMIT) errors.push("DAILY_LIMIT");
 
   return {
     passed: errors.length === 0,
-    errors
+    errors,
+    messages: errors.map(e => MESSAGES[e] || "Verification failed.")
   };
 }
 
-// Haversine formula — distance between two GPS coords in meters
+// Haversine distance in meters
 function getDistanceMeters(lat1, lng1, lat2, lng2) {
   const R = 6371000;
   const dLat = toRad(lat2 - lat1);

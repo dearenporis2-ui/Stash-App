@@ -1,78 +1,56 @@
-// ─────────────────────────────────────────────
 // functions/debtLedger.js
-// 5% platform fee debt tracking & account lockout
-// Runs server-side only via Firebase Cloud Functions
-// ─────────────────────────────────────────────
-
+// Admin settles a seller's 5% fee after receiving cash
 const admin = require("firebase-admin");
+const { HttpsError } = require("firebase-functions/v1").https;
 
-// Admin settles a seller's debt manually after receiving cash
+const { FieldValue } = admin.firestore;
+
 async function settleDebt(adminId, userId, debtId) {
-  const db = admin.firestore();
-
-  // Verify caller is admin
-  const adminSnap = await db.collection("users").doc(adminId).get();
-  if (!adminSnap.data().isAdmin) throw new Error("UNAUTHORIZED");
-
-  const debtRef = db.collection("debtLedger").doc(debtId);
-  const debtSnap = await debtRef.get();
-  const debt = debtSnap.data();
-
-  if (debt.userId !== userId) throw new Error("DEBT_USER_MISMATCH");
-  if (debt.status === "paid") throw new Error("ALREADY_PAID");
-
-  const batch = db.batch();
-
-  // Mark debt paid
-  batch.update(debtRef, {
-    status: "paid",
-    paidAt: admin.firestore.FieldValue.serverTimestamp(),
-    settledByAdmin: adminId
-  });
-
-  // Check if user has any remaining unpaid debts
-  const unpaidSnap = await db.collection("debtLedger")
-    .where("userId", "==", userId)
-    .where("status", "==", "unpaid")
-    .get();
-
-  // Only unlock account if this was their last unpaid debt
-  const remainingUnpaid = unpaidSnap.docs.filter(d => d.id !== debtId);
-  if (remainingUnpaid.length === 0) {
-    batch.update(db.collection("users").doc(userId), {
-      accountLocked: false,
-      pendingDebt: 0
-    });
+  if (typeof userId !== "string" || typeof debtId !== "string" || !userId || !debtId) {
+    throw new HttpsError("invalid-argument", "Missing user or debt");
   }
 
-  await batch.commit();
-  return { success: true, accountUnlocked: remainingUnpaid.length === 0 };
-}
-
-// Admin manually credits Gold Blocks (face-to-face cash top-up)
-async function adminCreditGoldBlocks(adminId, userId, amount, note) {
   const db = admin.firestore();
+  const adminRef = db.collection("users").doc(adminId);
+  const debtRef = db.collection("debtLedger").doc(debtId);
+  const userRef = db.collection("users").doc(userId);
+  const unpaidQuery = db.collection("debtLedger")
+    .where("userId", "==", userId)
+    .where("status", "==", "unpaid");
 
-  const adminSnap = await db.collection("users").doc(adminId).get();
-  if (!adminSnap.data().isAdmin) throw new Error("UNAUTHORIZED");
+  let accountUnlocked = false;
 
-  const batch = db.batch();
+  await db.runTransaction(async (tx) => {
+    accountUnlocked = false;
+    const [adminSnap, debtSnap, unpaidSnap] = await Promise.all([
+      tx.get(adminRef), tx.get(debtRef), tx.get(unpaidQuery)
+    ]);
 
-  batch.update(db.collection("users").doc(userId), {
-    goldBlocks: admin.firestore.FieldValue.increment(amount)
+    if (!adminSnap.exists || adminSnap.data().isAdmin !== true) {
+      throw new HttpsError("permission-denied", "Admins only");
+    }
+    if (!debtSnap.exists) throw new HttpsError("not-found", "Debt not found");
+    const debt = debtSnap.data();
+    if (debt.userId !== userId) throw new HttpsError("invalid-argument", "Debt doesn't belong to that user");
+    if (debt.status === "paid") throw new HttpsError("failed-precondition", "Already paid");
+
+    const remaining = unpaidSnap.docs.filter(d => d.id !== debtId).length;
+
+    tx.update(debtRef, {
+      status: "paid",
+      paidAt: FieldValue.serverTimestamp(),
+      settledByAdmin: adminId
+    });
+
+    if (remaining === 0) {
+      tx.update(userRef, { accountLocked: false, pendingDebt: 0 });
+      accountUnlocked = true;
+    } else {
+      tx.update(userRef, { pendingDebt: FieldValue.increment(-debt.amountSCR) });
+    }
   });
 
-  batch.set(db.collection("gbTransactions").doc(), {
-    userId,
-    amount,
-    type: "admin_credit",
-    note: note || "Face-to-face cash top-up",
-    processedBy: adminId,
-    createdAt: admin.firestore.FieldValue.serverTimestamp()
-  });
-
-  await batch.commit();
-  return { success: true };
+  return { success: true, accountUnlocked };
 }
 
-module.exports = { settleDebt, adminCreditGoldBlocks };
+module.exports = { settleDebt };
