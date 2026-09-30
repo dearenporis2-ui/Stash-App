@@ -26,6 +26,9 @@ let currentUser = null;
 let currentUserData = null;
 let currentScreen = 'dashboard';
 let marketFilter = 'all';
+let platformFilter = 'all';
+const PLATFORMS = ['PlayStation 4', 'PlayStation 5', 'Xbox One', 'Xbox Series X|S'];
+let lastDashListings = [];
 let marketListings = [];
 let currentSheetListing = null;
 let unsubscribeListeners = [];
@@ -121,7 +124,10 @@ function enterMemberMode() {
   } else if (currentScreen !== 'dashboard') {
     switchScreen('dashboard');
   }
-  if (currentUserData) migrateLegacyContacts();
+  if (currentUserData) {
+    migrateLegacyContacts();
+    migrateGameListings();
+  }
 }
 
 // Old listings stored contact info on the listing itself. Move it to the profile
@@ -153,6 +159,25 @@ async function migrateLegacyContacts() {
     await Promise.all(dirty.map(ref => updateDoc(ref, { whatsapp: deleteField(), instagram: deleteField() })));
   } catch (e) {
     console.error('Contact migration failed', e);
+  }
+}
+
+// One-time tidy-up: old game-disk listings that were filed under "Other"
+async function migrateGameListings() {
+  try {
+    const snap = await getDocs(query(collection(db, 'listings'), where('sellerId', '==', currentUser.uid)));
+    let moved = 0;
+    await Promise.all(snap.docs.map(async d => {
+      const x = d.data();
+      const name = x.name || '';
+      const platform = detectPlatform(name);
+      if (x.category !== 'Other' || !platform || !/(dis[ck]|game)/i.test(name)) return;
+      await updateDoc(d.ref, { category: 'Games', specs: { ...(x.specs || {}), specPlatform: platform } });
+      moved++;
+    }));
+    if (moved) showToast(`Moved ${moved} game listing${moved !== 1 ? 's' : ''} to the Games category`, 'success');
+  } catch (e) {
+    console.error('Game migration failed', e);
   }
 }
 
@@ -596,6 +621,7 @@ async function loadDashboard() {
     const listings = snap.docs
       .map(d => ({ id: d.id, ...d.data() }))
       .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+    lastDashListings = listings;
     renderDashboard(listings);
   });
   unsubscribeListeners.push(unsub);
@@ -672,7 +698,7 @@ function renderTopShelfCard(l, featured = false) {
       <div class="item-img tall">${imgContent}</div>
       <div class="item-name">${escHtml(l.name)}</div>
       <div class="item-sub">${escHtml(l.description || '')}</div>
-      <div class="item-value">SCR ${Number(l.priceSCR || 0).toLocaleString()}</div>
+      <div class="item-value">${priceHTML(l)}</div>
     </div>`;
 }
 
@@ -687,7 +713,7 @@ function renderClosetCard(l) {
       <div class="closet-img">${imgContent}</div>
       <div class="closet-name">${escHtml(l.name)}</div>
       <div class="closet-sub">${escHtml(l.category || '')}</div>
-      <div class="closet-value">SCR ${Number(l.priceSCR || 0).toLocaleString()}</div>
+      <div class="closet-value">${priceHTML(l)}</div>
       ${intentTag}
     </div>`;
 }
@@ -711,7 +737,7 @@ function renderPortfolioGrid(listings) {
         <div class="item-name">${escHtml(l.name)}</div>
         <div class="item-sub">${escHtml(l.category || '')}</div>
         <div class="p-footer">
-          <div><div class="p-value">SCR ${Number(l.priceSCR || 0).toLocaleString()}</div>${intentTag}</div>
+          <div><div class="p-value">${priceHTML(l)}</div>${intentTag}</div>
           <button class="inquire-btn" style="background:var(--glass-gold);color:var(--gold)" onclick="openEditListing('${l.id}')">Edit</button>
         </div>
       </div>`;
@@ -749,11 +775,15 @@ function renderMarketplace() {
   if (marketFilter !== 'all') {
     filtered = filtered.filter(l => l.category === marketFilter);
   }
+  if (marketFilter === 'Games' && platformFilter !== 'all') {
+    filtered = filtered.filter(l => matchesPlatform(l.specs?.specPlatform, platformFilter));
+  }
   if (search) {
     filtered = filtered.filter(l =>
       l.name?.toLowerCase().includes(search) ||
       l.category?.toLowerCase().includes(search) ||
-      l.description?.toLowerCase().includes(search)
+      l.description?.toLowerCase().includes(search) ||
+      l.specs?.specPlatform?.toLowerCase().includes(search)
     );
   }
 
@@ -785,7 +815,8 @@ function renderMarketplace() {
         <div class="listing-img" style="position:relative">${imgContent}${isMine ? '<div style="position:absolute;top:8px;right:8px;background:rgba(212,160,23,0.9);color:#080809;font-size:10px;font-weight:800;padding:3px 8px;border-radius:6px">YOURS</div>' : ''}</div>
         <div class="listing-name">${escHtml(l.name)}</div>
         <div class="listing-seller">by @${escHtml(l.sellerUsername || 'unknown')}${isMine ? ' (you)' : ''}</div>
-        <div class="listing-price">SCR ${Number(l.priceSCR || 0).toLocaleString()}</div>
+        ${l.specs?.specPlatform ? `<div class="platform-tag">🎮 ${escHtml(shortPlatform(l.specs.specPlatform))}</div>` : ''}
+        <div class="listing-price">${priceHTML(l)}</div>
         ${statusTag}
         <div class="listing-footer" style="margin-top:10px">
           ${actionBtn}
@@ -798,6 +829,19 @@ function setMarketFilter(el, filter) {
   document.querySelectorAll('#marketFilterRow .filter-chip').forEach(c => c.classList.remove('active'));
   el.classList.add('active');
   marketFilter = filter;
+  if (filter !== 'Games') platformFilter = 'all';
+  const row = document.getElementById('platformFilterRow');
+  if (row) {
+    row.style.display = filter === 'Games' ? 'flex' : 'none';
+    row.querySelectorAll('.filter-chip').forEach((c, i) => c.classList.toggle('active', i === 0));
+  }
+  renderMarketplace();
+}
+
+function setPlatformFilter(el, value) {
+  el.closest('.filter-row').querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  platformFilter = value;
   renderMarketplace();
 }
 
@@ -926,6 +970,10 @@ const specFields = {
     { id: 'specYear', label: 'Year', placeholder: 'e.g. 2021' },
     { id: 'specMileage', label: 'Mileage', placeholder: 'e.g. 15,000 km' }
   ],
+  Games: [
+    { id: 'specPlatform', label: 'Console', type: 'select', options: PLATFORMS },
+    { id: 'specCondition', label: 'Condition', placeholder: 'e.g. Sealed, Like New, Used' }
+  ],
   'Parts Bin': [
     { id: 'specPartType', label: 'Part Type', placeholder: 'e.g. Watch strap, Mod chip' },
     { id: 'specCompatibility', label: 'Compatibility', placeholder: 'e.g. Rolex 20mm' }
@@ -944,12 +992,23 @@ function updateSpecFields() {
     ${fields.map(f => `
       <div class="modal-group">
         <div class="modal-label">${f.label}</div>
-        <input class="modal-input" id="${f.id}" type="text" placeholder="${f.placeholder}" />
+        ${f.type === 'select'
+          ? `<select class="modal-input" id="${f.id}" style="color-scheme:dark"><option value="">Select ${f.label.toLowerCase()}</option>${f.options.map(o => `<option value="${o}">${o}</option>`).join('')}</select>`
+          : `<input class="modal-input" id="${f.id}" type="text" placeholder="${f.placeholder}" />`}
       </div>
     `).join('')}`;
 }
 
 let editingListingId = null;
+
+function resetDiscountFields() {
+  const p = document.getElementById('listingDiscountPrice');
+  const d = document.getElementById('listingDiscountDuration');
+  const keep = document.getElementById('keepTimerOption');
+  if (p) p.value = '';
+  if (d) d.value = '';
+  if (keep) keep.hidden = true;
+}
 
 function openListingModal() {
   if (!currentUser) return requireAuth('Sign up to list an item');
@@ -960,6 +1019,7 @@ function openListingModal() {
     return;
   }
   editingListingId = null;
+  resetDiscountFields();
   document.querySelector('#listingModal .modal-title').textContent = 'List an Item';
   document.querySelector('#listingModal .modal-btn').textContent = 'List Item ✦';
   document.getElementById('listingModal').classList.add('open');
@@ -981,9 +1041,20 @@ async function openEditListing(listingId) {
   document.getElementById('listingImageUrl').value = l.imageUrl || '';
   document.getElementById('listingPinned').checked = !!l.pinned;
 
+  // Discount (only prefilled while the sale is still running)
+  resetDiscountFields();
+  if (discountActive(l)) {
+    document.getElementById('listingDiscountPrice').value = l.discountPriceSCR;
+    if (l.discountEndsAt) {
+      const keep = document.getElementById('keepTimerOption');
+      keep.hidden = false;
+      document.getElementById('listingDiscountDuration').value = 'keep';
+    }
+  }
+
   // Set category via custom dropdown
   if (l.category) {
-    const catEmoji = { Watches:'⌚', Sneakers:'👟', Tech:'💻', Jewelry:'💍', Cars:'🚗', Bags:'👜', 'Parts Bin':'🔧', Other:'📦' };
+    const catEmoji = { Watches:'⌚', Sneakers:'👟', Tech:'💻', Jewelry:'💍', Cars:'🚗', Bags:'👜', Games:'🎮', 'Parts Bin':'🔧', Other:'📦' };
     selectCS('csCategory', 'listingCategory', l.category, (catEmoji[l.category]||'📦') + ' ' + l.category);
     updateSpecFields();
     // Fill spec fields after they render
@@ -1056,6 +1127,15 @@ async function submitListing() {
   if (!price || isNaN(price)) return showToast('Please enter a valid price', 'error');
   if (!category) return showToast('Please select a category', 'error');
 
+  // Discount (optional)
+  const discountRaw = document.getElementById('listingDiscountPrice').value;
+  const duration = document.getElementById('listingDiscountDuration').value;
+  const discountPrice = discountRaw === '' ? null : parseFloat(discountRaw);
+  if (discountPrice !== null) {
+    if (isNaN(discountPrice) || discountPrice <= 0) return showToast('Enter a valid sale price', 'error');
+    if (discountPrice >= price) return showToast('Sale price must be lower than the original price', 'error');
+  }
+
   // Collect spec fields
   const specs = {};
   const catFields = specFields[category] || [];
@@ -1063,6 +1143,9 @@ async function submitListing() {
     const el = document.getElementById(f.id);
     if (el && el.value) specs[f.id] = el.value.trim();
   });
+  if (category === 'Games' && !specs.specPlatform) {
+    return showToast('Choose which console this game is for', 'error');
+  }
 
   const listingData = {
     name,
@@ -1076,12 +1159,33 @@ async function submitListing() {
     pinned
   };
 
+  // Work out the sale fields
+  const DAY = 24 * 60 * 60 * 1000;
+  const durations = { '24h': DAY, '3d': 3 * DAY, '7d': 7 * DAY };
+  const saleFields = {};
+  const saleFieldsEdit = {};
+  if (discountPrice !== null) {
+    saleFields.discountPriceSCR = discountPrice;
+    saleFieldsEdit.discountPriceSCR = discountPrice;
+    if (durations[duration]) {
+      const endsAt = Timestamp.fromMillis(Date.now() + durations[duration]);
+      saleFields.discountEndsAt = endsAt;
+      saleFieldsEdit.discountEndsAt = endsAt;
+    } else if (duration !== 'keep') {
+      saleFieldsEdit.discountEndsAt = deleteField();   // no timer
+    }
+  } else {
+    saleFieldsEdit.discountPriceSCR = deleteField();
+    saleFieldsEdit.discountEndsAt = deleteField();
+  }
+
   try {
     if (editingListingId) {
       // EDIT MODE — update existing listing
       // also strips any contact info older listings still carry
       await updateDoc(doc(db, 'listings', editingListingId), {
         ...listingData,
+        ...saleFieldsEdit,
         whatsapp: deleteField(),
         instagram: deleteField()
       });
@@ -1091,6 +1195,7 @@ async function submitListing() {
       // CREATE MODE — new listing
       await addDoc(collection(db, 'listings'), {
         ...listingData,
+        ...saleFields,
         sellerId: currentUser.uid,
         sellerUsername: currentUserData.username,
         sellerDisplayName: currentUserData.displayName || currentUserData.username,
@@ -1125,8 +1230,9 @@ async function openSheet(listingId) {
       : getCategoryEmoji(l.category);
   }
   setText('sheetName', l.name);
-  setText('sheetSeller', 'Listed by @' + (l.sellerUsername || 'unknown'));
-  setText('sheetVal', 'SCR ' + Number(l.priceSCR || 0).toLocaleString());
+  setText('sheetSeller', 'Listed by @' + (l.sellerUsername || 'unknown') + (l.specs?.specPlatform ? ' · ' + l.specs.specPlatform : ''));
+  const valEl = document.getElementById('sheetVal');
+  if (valEl) valEl.innerHTML = priceHTML(l);
 
   const isGrail = l.intent === 'grail';
   const pitch = document.getElementById('autoPitch');
@@ -1437,8 +1543,82 @@ function animateCount(el, target) {
   }, 1800 / steps);
 }
 
+// ═══════════════════════════════════════════
+// DISCOUNTS (price = original list price, discountPriceSCR = sale price)
+// Expiry needs no server: a sale only counts while discountEndsAt is in the future.
+// ═══════════════════════════════════════════
+function discountActive(l) {
+  const d = l.discountPriceSCR;
+  if (typeof d !== 'number' || d <= 0 || d >= Number(l.priceSCR || 0)) return false;
+  const ends = l.discountEndsAt?.toMillis?.();
+  return !ends || ends > Date.now();
+}
+
+function formatCountdown(ms) {
+  if (ms <= 0) return 'Sale ended';
+  const totalMin = Math.floor(ms / 60000);
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  if (d > 0) return `Discount ends in ${d}d ${h}h`;
+  if (h > 0) return `Discount ends in ${h}h ${m}m`;
+  return `Discount ends in ${Math.max(m, 1)}m`;
+}
+
+function priceHTML(l) {
+  const base = Number(l.priceSCR || 0);
+  if (!discountActive(l)) return `SCR ${base.toLocaleString()}`;
+  const ends = l.discountEndsAt?.toMillis?.();
+  return `<span class="price-old">SCR ${base.toLocaleString()}</span>`
+    + `<span class="price-new">SCR ${Number(l.discountPriceSCR).toLocaleString()}</span>`
+    + `<span class="sale-badge">📉 Price Drop</span>`
+    + (ends ? `<span class="sale-timer" data-discount-ends="${ends}">${formatCountdown(ends - Date.now())}</span>` : '');
+}
+
+setInterval(() => {
+  let expired = false;
+  document.querySelectorAll('[data-discount-ends]').forEach(el => {
+    const left = Number(el.dataset.discountEnds) - Date.now();
+    if (left <= 0) expired = true;
+    el.textContent = formatCountdown(left);
+  });
+  if (expired) {
+    renderMarketplace();
+    if (lastDashListings.length) renderDashboard(lastDashListings);
+  }
+}, 15000);
+
+// ═══════════════════════════════════════════
+// GAME CONSOLES
+// ═══════════════════════════════════════════
+function detectPlatform(text) {
+  const t = (text || '').toLowerCase();
+  if (/\bps ?5\b|playstation ?5/.test(t)) return 'PlayStation 5';
+  if (/\bps ?4\b|playstation ?4/.test(t)) return 'PlayStation 4';
+  if (/series ?[xs]\b|xbox series/.test(t)) return 'Xbox Series X|S';
+  if (/xbox ?one|\bxone\b/.test(t)) return 'Xbox One';
+  return null;
+}
+
+function matchesPlatform(platform, filter) {
+  if (filter === 'all') return true;
+  const map = {
+    ps: ['PlayStation 4', 'PlayStation 5'],
+    ps4: ['PlayStation 4'],
+    ps5: ['PlayStation 5'],
+    xbox: ['Xbox One', 'Xbox Series X|S'],
+    xone: ['Xbox One'],
+    xsx: ['Xbox Series X|S']
+  };
+  return (map[filter] || []).includes(platform);
+}
+
+function shortPlatform(p) {
+  return { 'PlayStation 4': 'PS4', 'PlayStation 5': 'PS5', 'Xbox One': 'Xbox One', 'Xbox Series X|S': 'Series X|S' }[p] || p;
+}
+
 function getCategoryEmoji(cat) {
-  const map = { Watches:'⌚', Sneakers:'👟', Tech:'💻', Jewelry:'💍', Cars:'🚗', Bags:'👜', 'Parts Bin':'🔧', Other:'📦' };
+  const map = { Watches:'⌚', Sneakers:'👟', Tech:'💻', Jewelry:'💍', Cars:'🚗', Bags:'👜', Games:'🎮', 'Parts Bin':'🔧', Other:'📦' };
   return map[cat] || '📦';
 }
 
@@ -1701,6 +1881,7 @@ window.closeAuth = closeAuth;
 window.completeProfileSetup = completeProfileSetup;
 window.cancelProfileSetup = cancelProfileSetup;
 window.guestInquire = guestInquire;
+window.setPlatformFilter = setPlatformFilter;
 window.handleRegister = handleRegister;
 window.handleLogout = handleLogout;
 window.showLogin = showLogin;

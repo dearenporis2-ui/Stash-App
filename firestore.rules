@@ -17,6 +17,33 @@ service cloud.firestore {
         && (url == '' || url.matches('https://res\\.cloudinary\\.com/dflbqacnt/.*'));
     }
 
+    // Optional sale fields on a listing: price must be lower, timer max 8 days out
+    function validSale(d) {
+      return (!('discountPriceSCR' in d)
+               || (d.discountPriceSCR is number
+                   && d.discountPriceSCR > 0
+                   && d.discountPriceSCR < d.priceSCR))
+          && (!('discountEndsAt' in d)
+               || ('discountPriceSCR' in d
+                   && d.discountEndsAt is timestamp
+                   && d.discountEndsAt > request.time
+                   && d.discountEndsAt <= request.time + duration.value(8, 'd')));
+    }
+
+    // Same, for edits: an unchanged (possibly already ended) timer is always allowed
+    function validSaleUpdate(d) {
+      return (!('discountPriceSCR' in d)
+               || (d.discountPriceSCR is number
+                   && d.discountPriceSCR > 0
+                   && d.discountPriceSCR < d.priceSCR))
+          && (!('discountEndsAt' in d)
+               || ('discountPriceSCR' in d
+                   && d.discountEndsAt is timestamp
+                   && (d.discountEndsAt == resource.data.get('discountEndsAt', null)
+                       || (d.discountEndsAt > request.time
+                           && d.discountEndsAt <= request.time + duration.value(8, 'd')))));
+    }
+
     // UTC date, e.g. 2026-9-30 (used to limit handshakes per pair per day)
     function dayKey() {
       return string(request.time.year()) + '-'
@@ -67,7 +94,7 @@ service cloud.firestore {
       allow create: if signedIn()
         && request.resource.data.keys().hasOnly([
              'name', 'priceSCR', 'category', 'intent', 'frame', 'description',
-             'imageUrl', 'specs', 'pinned',
+             'imageUrl', 'specs', 'pinned', 'discountPriceSCR', 'discountEndsAt',
              'sellerId', 'sellerUsername', 'sellerDisplayName',
              'status', 'createdAt'
            ])
@@ -81,6 +108,7 @@ service cloud.firestore {
         && request.resource.data.priceSCR is number
         && request.resource.data.priceSCR > 0
         && request.resource.data.priceSCR < 10000000
+        && validSale(request.resource.data)
         && validImage(request.resource.data.get('imageUrl', ''));
 
       allow update: if signedIn()
@@ -90,6 +118,7 @@ service cloud.firestore {
         && request.resource.data.priceSCR is number
         && request.resource.data.priceSCR > 0
         && request.resource.data.priceSCR < 10000000
+        && validSaleUpdate(request.resource.data)
         && validImage(request.resource.data.get('imageUrl', ''));
 
       allow delete: if signedIn()

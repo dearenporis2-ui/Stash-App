@@ -172,6 +172,13 @@
   body.guest .bottom-nav,
   body.guest .sidebar-bottom .modal-btn-ghost { display: none !important; }
 </style>
+<style>
+  .price-old { text-decoration: line-through; color: var(--text-muted); font-weight: 600; font-size: 0.72em; margin-right: 8px; }
+  .price-new { color: #ff6b6b; }
+  .sale-badge { display: inline-block; background: rgba(255,93,93,0.14); border: 1px solid rgba(255,93,93,0.4); color: #ff7a7a; font-size: 10px; font-weight: 800; letter-spacing: 0.5px; padding: 3px 8px; border-radius: 8px; margin-left: 8px; vertical-align: middle; }
+  .sale-timer { display: block; font-size: 11px; color: #ff9a9a; font-weight: 600; margin-top: 4px; }
+  .platform-tag { font-size: 11px; font-weight: 700; color: var(--text-muted); margin: 2px 0 6px; }
+</style>
 </head>
 <body style="background:#080809;">
 <!-- ═══════════════════════════════════════
@@ -464,7 +471,17 @@
             <div class="filter-chip" onclick="setMarketFilter(this,'Tech')">Tech</div>
             <div class="filter-chip" onclick="setMarketFilter(this,'Jewelry')">Jewelry</div>
             <div class="filter-chip" onclick="setMarketFilter(this,'Cars')">Cars</div>
+            <div class="filter-chip" onclick="setMarketFilter(this,'Games')">🎮 Games</div>
             <div class="filter-chip" onclick="setMarketFilter(this,'Parts Bin')">Parts Bin</div>
+          </div>
+          <div class="filter-row" id="platformFilterRow" style="display:none;margin-top:-6px">
+            <div class="filter-chip active" onclick="setPlatformFilter(this,'all')">All consoles</div>
+            <div class="filter-chip" onclick="setPlatformFilter(this,'ps')">PlayStation</div>
+            <div class="filter-chip" onclick="setPlatformFilter(this,'ps4')">PS4</div>
+            <div class="filter-chip" onclick="setPlatformFilter(this,'ps5')">PS5</div>
+            <div class="filter-chip" onclick="setPlatformFilter(this,'xbox')">Xbox</div>
+            <div class="filter-chip" onclick="setPlatformFilter(this,'xone')">Xbox One</div>
+            <div class="filter-chip" onclick="setPlatformFilter(this,'xsx')">Series X|S</div>
           </div>
           <div class="section-header">
             <div class="section-title">🔥 Active Listings</div>
@@ -598,6 +615,20 @@
         <div class="modal-label">Price (SCR)</div>
         <input class="modal-input" id="listingPrice" type="number" placeholder="e.g. 45000" />
       </div>
+      <div class="modal-group" style="grid-column:span 2">
+        <div class="modal-label">Discount <span style="text-transform:none;letter-spacing:0;font-weight:500;opacity:0.6">(optional)</span></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <input class="modal-input" id="listingDiscountPrice" type="number" placeholder="Sale price (SCR)" />
+          <select class="modal-input" id="listingDiscountDuration" style="color-scheme:dark">
+            <option value="">No timer</option>
+            <option value="24h">Ends in 24 hours</option>
+            <option value="3d">Ends in 3 days</option>
+            <option value="7d">Ends in 1 week</option>
+            <option value="keep" id="keepTimerOption" hidden>Keep current timer</option>
+          </select>
+        </div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.35);margin-top:6px">Buyers see the old price crossed out. With a timer, the price goes back automatically when it ends.</div>
+      </div>
       <div class="modal-group">
         <div class="modal-label">Category</div>
         <div class="custom-select-wrap" id="csCategory">
@@ -613,6 +644,7 @@
             <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Jewelry','💍','updateSpecFields')"><span class="cs-opt-icon">💍</span>Jewelry</div>
             <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Cars','🚗','updateSpecFields')"><span class="cs-opt-icon">🚗</span>Cars</div>
             <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Bags','👜','updateSpecFields')"><span class="cs-opt-icon">👜</span>Bags</div>
+            <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Games','🎮','updateSpecFields')"><span class="cs-opt-icon">🎮</span>Games</div>
             <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Parts Bin','🔧','updateSpecFields')"><span class="cs-opt-icon">🔧</span>Parts Bin</div>
             <div class="cs-option" onclick="selectCS('csCategory','listingCategory','Other','📦','updateSpecFields')"><span class="cs-opt-icon">📦</span>Other</div>
           </div>
