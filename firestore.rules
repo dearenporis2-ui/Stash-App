@@ -32,7 +32,7 @@ service cloud.firestore {
         && request.auth.uid == userId
         && request.resource.data.keys().hasOnly([
              'uid', 'username', 'displayName', 'bio',
-             'avatarUrl', 'portfolioValue', 'createdAt'
+             'avatarUrl', 'portfolioValue', 'whatsapp', 'instagram', 'createdAt'
            ])
         && request.resource.data.uid == userId
         && request.resource.data.username is string
@@ -40,13 +40,17 @@ service cloud.firestore {
         && request.resource.data.username.size() <= 30
         && request.resource.data.portfolioValue == 0
         && request.resource.data.createdAt == request.time
+        && request.resource.data.get('whatsapp', '').size() <= 25
+        && request.resource.data.get('instagram', '').size() <= 31
         && validImage(request.resource.data.get('avatarUrl', ''));
 
       // Users can only edit these profile fields, nothing else
       allow update: if signedIn()
         && request.auth.uid == userId
         && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['displayName', 'bio', 'avatarUrl', 'portfolioValue'])
+             .hasOnly(['displayName', 'bio', 'avatarUrl', 'portfolioValue', 'whatsapp', 'instagram'])
+        && request.resource.data.get('whatsapp', '').size() <= 25
+        && request.resource.data.get('instagram', '').size() <= 31
         && validImage(request.resource.data.get('avatarUrl', ''))
         && request.resource.data.get('displayName', '').size() <= 40
         && request.resource.data.get('bio', '').size() <= 300
@@ -57,12 +61,13 @@ service cloud.firestore {
 
     // ─── Listings ───
     match /listings/{listingId} {
-      allow read: if signedIn();
+      // Public: anyone can browse. Contact info now lives on profiles (members only).
+      allow read: if true;
 
       allow create: if signedIn()
         && request.resource.data.keys().hasOnly([
              'name', 'priceSCR', 'category', 'intent', 'frame', 'description',
-             'imageUrl', 'specs', 'pinned', 'whatsapp', 'instagram',
+             'imageUrl', 'specs', 'pinned',
              'sellerId', 'sellerUsername', 'sellerDisplayName',
              'status', 'createdAt'
            ])

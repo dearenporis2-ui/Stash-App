@@ -9,12 +9,14 @@ import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signOut,
-  onAuthStateChanged
+  onAuthStateChanged,
+  GoogleAuthProvider,
+  signInWithPopup
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import {
   doc, getDoc, setDoc, updateDoc, addDoc, deleteDoc,
   collection, query, where, orderBy, limit,
-  onSnapshot, getDocs, serverTimestamp, Timestamp, writeBatch, getCountFromServer
+  onSnapshot, getDocs, serverTimestamp, Timestamp, writeBatch, getCountFromServer, deleteField
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 // ═══════════════════════════════════════════
@@ -61,19 +63,132 @@ function showLoadingAnimation() {
 // ═══════════════════════════════════════════
 // AUTH
 // ═══════════════════════════════════════════
+let registering = false;
+let isGuest = true;
+let navBound = false;
+let pendingSheetListing = null;
+let marketUnsub = null;
+let openListingAfterProfile = false;
+
+function cleanupListeners() {
+  unsubscribeListeners.forEach(u => u());
+  unsubscribeListeners = [];
+  marketUnsub = null;
+}
+
 onAuthStateChanged(auth, async (user) => {
+  cleanupListeners();
   if (user) {
     currentUser = user;
+    currentUserData = null;
+    const justRegistered = registering;
+    registering = false;
     await loadUserData(user.uid);
-    showApp();
-    initApp();
+    if (!currentUserData && !justRegistered) {
+      // Signed in (e.g. first Google sign-in) but no profile yet
+      openProfileSetup();
+    } else {
+      enterMemberMode();
+    }
   } else {
     currentUser = null;
     currentUserData = null;
-    showAuth();
+    enterGuestMode();
   }
   hideLoadingScreen();
 });
+
+function enterGuestMode() {
+  isGuest = true;
+  document.body.classList.add('guest');
+  document.getElementById('authWrap').style.display = 'none';
+  document.getElementById('appWrap').style.display = 'block';
+  bindNavOnce();
+  loadMarketplace();
+  if (currentScreen !== 'marketplace') switchScreen('marketplace');
+}
+
+function enterMemberMode() {
+  isGuest = false;
+  document.body.classList.remove('guest');
+  showApp();
+  initApp();
+  const back = pendingSheetListing;
+  pendingSheetListing = null;
+  if (back) {
+    if (currentScreen !== 'marketplace') switchScreen('marketplace');
+    openSheet(back);
+  } else if (currentScreen !== 'dashboard') {
+    switchScreen('dashboard');
+  }
+  if (currentUserData) migrateLegacyContacts();
+}
+
+// Old listings stored contact info on the listing itself. Move it to the profile
+// and strip it from the listing (listings are publicly readable now).
+async function migrateLegacyContacts() {
+  try {
+    const snap = await getDocs(query(collection(db, 'listings'), where('sellerId', '==', currentUser.uid)));
+    let wa = '';
+    let ig = '';
+    const dirty = [];
+    snap.docs.forEach(d => {
+      const x = d.data();
+      if ('whatsapp' in x || 'instagram' in x) {
+        dirty.push(d.ref);
+        wa = wa || x.whatsapp || '';
+        ig = ig || x.instagram || '';
+      }
+    });
+    if (!dirty.length) return;
+
+    const profileUpdate = {};
+    const cleanWa = normalizeWhatsApp(wa);
+    const cleanIg = normalizeInstagram(ig);
+    if (!currentUserData.whatsapp && cleanWa) profileUpdate.whatsapp = cleanWa;
+    if (!currentUserData.instagram && cleanIg) profileUpdate.instagram = cleanIg;
+    if (Object.keys(profileUpdate).length) {
+      await updateDoc(doc(db, 'users', currentUser.uid), profileUpdate);
+    }
+    await Promise.all(dirty.map(ref => updateDoc(ref, { whatsapp: deleteField(), instagram: deleteField() })));
+  } catch (e) {
+    console.error('Contact migration failed', e);
+  }
+}
+
+function normalizeWhatsApp(v) {
+  v = (v || '').trim();
+  if (!v) return '';
+  return /^[+0-9 ()-]{5,25}$/.test(v) ? v : null;
+}
+
+function normalizeInstagram(v) {
+  v = (v || '').trim().replace(/^@/, '');
+  if (!v) return '';
+  return /^[A-Za-z0-9._]{1,30}$/.test(v) ? '@' + v : null;
+}
+
+function bindNavOnce() {
+  if (navBound) return;
+  navBound = true;
+  setupSidebarNav();
+  setupMobileNav();
+}
+
+function requireAuth(message) {
+  if (message) showToast(message, 'info');
+  openAuth('register');
+}
+
+function openAuth(mode = 'login') {
+  document.getElementById('authWrap').style.display = 'flex';
+  if (mode === 'register') showRegister(); else showLogin();
+}
+
+function closeAuth() {
+  if (currentUser) return;
+  document.getElementById('authWrap').style.display = 'none';
+}
 
 // Start the loading animation immediately
 showLoadingAnimation();
@@ -102,11 +217,17 @@ async function handleRegister() {
   const username = document.getElementById('regUsername').value.trim().toLowerCase().replace('@','');
   const email = document.getElementById('regEmail').value.trim();
   const password = document.getElementById('regPassword').value;
+  const whatsapp = normalizeWhatsApp(document.getElementById('regWhatsApp').value);
+  const instagram = normalizeInstagram(document.getElementById('regInstagram').value);
 
   if (!username || !email || !password) return showToast('Please fill in all fields', 'error');
   if (username.length < 3) return showToast('Username must be at least 3 characters', 'error');
+  if (username.length > 30) return showToast('Username is too long', 'error');
+  if (whatsapp === null) return showToast('WhatsApp should look like +2482510123', 'error');
+  if (instagram === null) return showToast('That Instagram handle looks invalid', 'error');
 
   let cred = null;
+  registering = true;
   try {
     // Create the auth account FIRST so we're authenticated for Firestore reads/writes
     cred = await createUserWithEmailAndPassword(auth, email, password);
@@ -126,16 +247,87 @@ async function handleRegister() {
       bio: '',
       avatarUrl: '',
       portfolioValue: 0,
+      whatsapp,
+      instagram,
       createdAt: serverTimestamp()
     });
     showToast('Welcome to Stash!', 'success');
   } catch (err) {
+    registering = false;
     // Clean up auth account if something failed after it was created
     if (cred && cred.user) {
       try { await cred.user.delete(); } catch (e) {}
     }
     showToast(err.message, 'error');
   }
+}
+
+async function handleGoogleSignIn() {
+  try {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    await signInWithPopup(auth, provider);
+  } catch (err) {
+    if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') return;
+    if (err.code === 'auth/unauthorized-domain') {
+      return showToast('This site is not in Firebase Authorized domains yet.', 'error');
+    }
+    if (err.code === 'auth/popup-blocked') {
+      return showToast('Your browser blocked the Google window. Allow pop-ups and try again.', 'error');
+    }
+    showToast(err.message, 'error');
+  }
+}
+
+function openProfileSetup() {
+  isGuest = false;
+  document.body.classList.remove('guest');
+  document.getElementById('appWrap').style.display = 'none';
+  document.getElementById('authWrap').style.display = 'flex';
+  document.getElementById('loginCard').style.display = 'none';
+  document.getElementById('registerCard').style.display = 'none';
+  document.getElementById('setupCard').style.display = 'block';
+  const base = (currentUser.displayName || (currentUser.email || '').split('@')[0] || '')
+    .toLowerCase().replace(/[^a-z0-9_.]/g, '').slice(0, 20);
+  document.getElementById('setupUsername').value = base;
+}
+
+async function completeProfileSetup() {
+  if (!currentUser) return;
+  const username = document.getElementById('setupUsername').value.trim().toLowerCase().replace('@', '');
+  const whatsapp = normalizeWhatsApp(document.getElementById('setupWhatsApp').value);
+  const instagram = normalizeInstagram(document.getElementById('setupInstagram').value);
+
+  if (username.length < 3) return showToast('Username must be at least 3 characters', 'error');
+  if (username.length > 30) return showToast('Username is too long', 'error');
+  if (whatsapp === null) return showToast('WhatsApp should look like +2482510123', 'error');
+  if (instagram === null) return showToast('That Instagram handle looks invalid', 'error');
+
+  try {
+    const taken = await getDocs(query(collection(db, 'users'), where('username', '==', username)));
+    if (!taken.empty) return showToast('Username already taken', 'error');
+
+    const profile = {
+      uid: currentUser.uid,
+      username,
+      displayName: (currentUser.displayName || username).slice(0, 40),
+      bio: '',
+      avatarUrl: '',
+      portfolioValue: 0,
+      whatsapp,
+      instagram
+    };
+    await setDoc(doc(db, 'users', currentUser.uid), { ...profile, createdAt: serverTimestamp() });
+    currentUserData = profile;
+    showToast('Welcome to Stash!', 'success');
+    enterMemberMode();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function cancelProfileSetup() {
+  signOut(auth);
 }
 
 async function handleLogin() {
@@ -151,8 +343,7 @@ async function handleLogin() {
 }
 
 async function handleLogout() {
-  unsubscribeListeners.forEach(u => u());
-  unsubscribeListeners = [];
+  cleanupListeners();
   await signOut(auth);
 }
 
@@ -169,19 +360,20 @@ function showAuth() {
 function showLogin() {
   document.getElementById('loginCard').style.display = 'block';
   document.getElementById('registerCard').style.display = 'none';
+  document.getElementById('setupCard').style.display = 'none';
 }
 
 function showRegister() {
   document.getElementById('loginCard').style.display = 'none';
   document.getElementById('registerCard').style.display = 'block';
+  document.getElementById('setupCard').style.display = 'none';
 }
 
 // ═══════════════════════════════════════════
 // APP INIT
 // ═══════════════════════════════════════════
 function initApp() {
-  setupSidebarNav();
-  setupMobileNav();
+  bindNavOnce();
   updateUserUI();
   loadDashboard();
   loadMarketplace();
@@ -338,6 +530,12 @@ const topbarTitles = {
 
 function switchScreen(id) {
   if (id === currentScreen) return;
+
+  // Guests can only browse the marketplace
+  if (!currentUser && id !== 'marketplace') {
+    requireAuth('Sign up to see this. It only takes a moment.');
+    return;
+  }
 
   // Hard block — only the verified admin account can ever see this screen
   if (id === 'admin' && !currentUserData?.isAdmin) {
@@ -524,6 +722,7 @@ function renderPortfolioGrid(listings) {
 // MARKETPLACE
 // ═══════════════════════════════════════════
 async function loadMarketplace() {
+  if (marketUnsub) return;
   // No orderBy to avoid composite index requirement
   const q = query(
     collection(db, 'listings'),
@@ -531,13 +730,16 @@ async function loadMarketplace() {
     limit(50)
   );
 
-  const unsub = onSnapshot(q, (snap) => {
+  marketUnsub = onSnapshot(q, (snap) => {
     marketListings = snap.docs
       .map(d => ({ id: d.id, ...d.data() }))
       .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
     renderMarketplace();
+  }, (err) => {
+    console.error('Marketplace load failed', err);
+    marketUnsub = null;
   });
-  unsubscribeListeners.push(unsub);
+  unsubscribeListeners.push(marketUnsub);
 }
 
 function renderMarketplace() {
@@ -750,6 +952,13 @@ function updateSpecFields() {
 let editingListingId = null;
 
 function openListingModal() {
+  if (!currentUser) return requireAuth('Sign up to list an item');
+  if (!currentUserData?.whatsapp && !currentUserData?.instagram) {
+    showToast('Add your WhatsApp or Instagram to your profile first so buyers can reach you.', 'info');
+    openListingAfterProfile = true;
+    openEditProfile();
+    return;
+  }
   editingListingId = null;
   document.querySelector('#listingModal .modal-title').textContent = 'List an Item';
   document.querySelector('#listingModal .modal-btn').textContent = 'List Item ✦';
@@ -770,8 +979,6 @@ async function openEditListing(listingId) {
   document.getElementById('listingPrice').value = l.priceSCR || '';
   document.getElementById('listingDesc').value = l.description || '';
   document.getElementById('listingImageUrl').value = l.imageUrl || '';
-  document.getElementById('listingWhatsApp').value = l.whatsapp || '';
-  document.getElementById('listingInstagram').value = l.instagram || '';
   document.getElementById('listingPinned').checked = !!l.pinned;
 
   // Set category via custom dropdown
@@ -812,7 +1019,7 @@ function closeListingModal() {
   document.getElementById('listingModal').classList.remove('open');
   editingListingId = null;
   // Reset form
-  ['listingName','listingPrice','listingDesc','listingImageUrl','listingWhatsApp','listingInstagram'].forEach(id => {
+  ['listingName','listingPrice','listingDesc','listingImageUrl'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.value = '';
   });
@@ -844,15 +1051,10 @@ async function submitListing() {
   const desc = document.getElementById('listingDesc').value.trim();
   const imageUrl = document.getElementById('listingImageUrl').value;
   const pinned = document.getElementById('listingPinned').checked;
-  const whatsapp = document.getElementById('listingWhatsApp').value.trim();
-  const instagram = document.getElementById('listingInstagram').value.trim();
 
   if (!name) return showToast('Please enter an item name', 'error');
   if (!price || isNaN(price)) return showToast('Please enter a valid price', 'error');
   if (!category) return showToast('Please select a category', 'error');
-  if (intent !== 'grail' && !whatsapp && !instagram) {
-    return showToast('Add a WhatsApp number or Instagram so buyers can reach you', 'error');
-  }
 
   // Collect spec fields
   const specs = {};
@@ -871,15 +1073,18 @@ async function submitListing() {
     description: desc,
     imageUrl: imageUrl || '',
     specs,
-    pinned,
-    whatsapp: whatsapp || '',
-    instagram: instagram || ''
+    pinned
   };
 
   try {
     if (editingListingId) {
       // EDIT MODE — update existing listing
-      await updateDoc(doc(db, 'listings', editingListingId), listingData);
+      // also strips any contact info older listings still carry
+      await updateDoc(doc(db, 'listings', editingListingId), {
+        ...listingData,
+        whatsapp: deleteField(),
+        instagram: deleteField()
+      });
       closeListingModal();
       showToast('Listing updated!', 'success');
     } else {
@@ -929,14 +1134,24 @@ async function openSheet(listingId) {
   const actionLabel = document.getElementById('actionLabel');
   const grailNotice = document.getElementById('grailNotice');
   const pitchText = document.getElementById('pitchText');
+  const guestBtn = document.getElementById('guestInquireBtn');
+  const igBtn = document.getElementById('sheetIgBtn');
+  if (guestBtn) guestBtn.style.display = 'none';
 
   if (isGrail) {
     if (pitch) pitch.style.display = 'none';
     if (actionBtns) actionBtns.style.display = 'none';
     if (actionLabel) actionLabel.style.display = 'none';
     if (grailNotice) grailNotice.style.display = 'block';
-    const igBtnHide = document.getElementById('sheetIgBtn');
-    if (igBtnHide) igBtnHide.style.display = 'none';
+    if (igBtn) igBtn.style.display = 'none';
+  } else if (!currentUser) {
+    // Guests can look, but contacting a seller needs an account
+    if (pitch) pitch.style.display = 'none';
+    if (actionBtns) actionBtns.style.display = 'none';
+    if (actionLabel) actionLabel.style.display = 'none';
+    if (grailNotice) grailNotice.style.display = 'none';
+    if (igBtn) igBtn.style.display = 'none';
+    if (guestBtn) guestBtn.style.display = 'flex';
   } else {
     if (pitch) pitch.style.display = '';
     if (actionBtns) actionBtns.style.display = '';
@@ -951,10 +1166,21 @@ async function openSheet(listingId) {
       ? `Yo! I saw your ${l.name} on Stash — I've got heat to swap. Let's talk.`
       : `Yo! I saw your ${l.name} on Stash. What's your best price?`;
 
+    // Contact info lives on the seller's profile (members only)
+    let contact = {};
+    try {
+      const sellerSnap = await getDoc(doc(db, 'users', l.sellerId));
+      if (sellerSnap.exists()) contact = sellerSnap.data();
+    } catch (e) {
+      console.error('Seller contact load failed', e);
+    }
+    const whatsapp = contact.whatsapp || l.whatsapp || '';
+    const instagram = contact.instagram || l.instagram || '';
+
     const waBtn = document.getElementById('sheetWaBtn');
     if (waBtn) {
-      if (l.whatsapp) {
-        const cleanNumber = l.whatsapp.replace(/[^0-9]/g, '');
+      const cleanNumber = whatsapp.replace(/[^0-9]/g, '');
+      if (cleanNumber) {
         waBtn.href = `https://wa.me/${cleanNumber}?text=${encodeURIComponent(plainMsg)}`;
         waBtn.style.opacity = '1';
         waBtn.style.pointerEvents = 'auto';
@@ -965,11 +1191,10 @@ async function openSheet(listingId) {
       }
     }
 
-    const igBtn = document.getElementById('sheetIgBtn');
     if (igBtn) {
-      if (l.instagram) {
-        const handle = l.instagram.replace('@', '').trim();
-        igBtn.href = `https://instagram.com/${handle}`;
+      const handle = instagram.replace('@', '').trim();
+      if (handle) {
+        igBtn.href = `https://instagram.com/${encodeURIComponent(handle)}`;
         igBtn.style.display = 'flex';
       } else {
         igBtn.style.display = 'none';
@@ -978,6 +1203,12 @@ async function openSheet(listingId) {
   }
   document.getElementById('sheetOverlay').classList.add('open');
   document.body.style.overflow = 'hidden';
+}
+
+function guestInquire() {
+  if (currentSheetListing) pendingSheetListing = currentSheetListing.id;
+  closeSheet();
+  requireAuth('Sign up free to contact sellers');
 }
 
 function closeSheet() {
@@ -1326,6 +1557,8 @@ function openEditProfile() {
   document.getElementById('editDisplayName').value = currentUserData.displayName || '';
   document.getElementById('editBio').value = currentUserData.bio || '';
   document.getElementById('editAvatarUrl').value = currentUserData.avatarUrl || '';
+  document.getElementById('editWhatsApp').value = currentUserData.whatsapp || '';
+  document.getElementById('editInstagram').value = currentUserData.instagram || '';
 
   const preview = document.getElementById('profilePhotoPreview');
   if (currentUserData.avatarUrl) {
@@ -1337,6 +1570,7 @@ function openEditProfile() {
 }
 
 function closeEditProfile() {
+  openListingAfterProfile = false;
   document.getElementById('editProfileModal').classList.remove('open');
 }
 
@@ -1353,17 +1587,29 @@ async function saveProfile() {
   const displayName = document.getElementById('editDisplayName').value.trim();
   const bio = document.getElementById('editBio').value.trim();
   const avatarUrl = document.getElementById('editAvatarUrl').value;
+  const whatsapp = normalizeWhatsApp(document.getElementById('editWhatsApp').value);
+  const instagram = normalizeInstagram(document.getElementById('editInstagram').value);
 
   if (!displayName) return showToast('Display name cannot be empty', 'error');
+  if (whatsapp === null) return showToast('WhatsApp should look like +2482510123', 'error');
+  if (instagram === null) return showToast('That Instagram handle looks invalid', 'error');
 
+  const reopenListing = openListingAfterProfile;
   try {
     await updateDoc(doc(db, 'users', currentUser.uid), {
       displayName,
       bio,
-      avatarUrl
+      avatarUrl,
+      whatsapp,
+      instagram
     });
     closeEditProfile();
     showToast('Profile updated!', 'success');
+    if (reopenListing && (whatsapp || instagram)) {
+      openListingAfterProfile = false;
+      currentUserData = { ...currentUserData, whatsapp, instagram };
+      openListingModal();
+    }
   } catch (err) {
     showToast('Error saving profile: ' + err.message, 'error');
   }
@@ -1449,6 +1695,12 @@ document.getElementById('qrModal')?.addEventListener('click', e => { if (e.targe
 
 // ── Expose functions to HTML onclick
 window.handleLogin = handleLogin;
+window.handleGoogleSignIn = handleGoogleSignIn;
+window.openAuth = openAuth;
+window.closeAuth = closeAuth;
+window.completeProfileSetup = completeProfileSetup;
+window.cancelProfileSetup = cancelProfileSetup;
+window.guestInquire = guestInquire;
 window.handleRegister = handleRegister;
 window.handleLogout = handleLogout;
 window.showLogin = showLogin;
