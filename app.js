@@ -14,13 +14,8 @@ import {
 import {
   doc, getDoc, setDoc, updateDoc, addDoc, deleteDoc,
   collection, query, where, orderBy, limit,
-  onSnapshot, getDocs, serverTimestamp, increment, arrayUnion
+  onSnapshot, getDocs, serverTimestamp, Timestamp, writeBatch, getCountFromServer
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-import {
-  getFunctions, httpsCallable
-} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-functions.js";
-
-const functions = getFunctions();
 
 // ═══════════════════════════════════════════
 // STATE
@@ -127,17 +122,10 @@ async function handleRegister() {
     await setDoc(doc(db, 'users', cred.user.uid), {
       uid: cred.user.uid,
       username,
-      email,
       displayName: username,
       bio: '',
       avatarUrl: '',
-      goldBlocks: 0,
-      traderRep: 0,
       portfolioValue: 0,
-      accountLocked: false,
-      pendingDebt: 0,
-      isAdmin: false,
-      ownedFrames: ['default'],
       createdAt: serverTimestamp()
     });
     showToast('Welcome to Stash!', 'success');
@@ -198,13 +186,11 @@ function initApp() {
   loadDashboard();
   loadMarketplace();
   loadLeaderboard();
-  startCountdown();
 }
 
 function updateUserUI() {
   if (!currentUserData) return;
   const initials = (currentUserData.displayName || currentUserData.username || 'U').substring(0,2).toUpperCase();
-  const gbDisplay = `${Number(currentUserData.goldBlocks || 0).toLocaleString()} GB`;
 
   // Avatars
   ['sidebarAvatar','topbarAvatar','mobileAvatar'].forEach(id => {
@@ -223,19 +209,8 @@ function updateUserUI() {
   if (nameEl) nameEl.textContent = currentUserData.displayName || currentUserData.username;
   if (handleEl) handleEl.textContent = '@' + currentUserData.username;
 
-  // GB Balances
-  ['sidebarGBBalance','topbarGBBalance','mobileGBBalance','dashGBBalance'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = gbDisplay;
-  });
-
   // Dashboard stats
-  const repEl = document.getElementById('dashTraderRep');
-  if (repEl) repEl.textContent = currentUserData.traderRep || 0;
-
-  // Account locked banner
-  const banner = document.getElementById('lockedBanner');
-  if (banner) banner.style.display = currentUserData.accountLocked ? 'flex' : 'none';
+  refreshMyRep();
 
   // Admin nav
   if (currentUserData.isAdmin) {
@@ -246,45 +221,31 @@ function updateUserUI() {
   updatePortfolioUI();
   // Mobile drawer
   updateDrawerUI();
-  // Refresh exotic shop owned badges whenever user data changes
-  refreshShopOwnership();
 }
 
-function refreshShopOwnership() {
-  const owned = currentUserData?.ownedFrames || ['default'];
-  const shopFrames = [
-    { id: 'gold', btnId: 'buyBtnGold' },
-    { id: 'holo', btnId: 'buyBtnHolo' },
-    { id: 'purple', btnId: 'buyBtnPurple' },
-    { id: 'carbon', btnId: 'buyBtnCarbon' },
-    { id: 'neon', btnId: 'buyBtnNeon' }
-  ];
-  shopFrames.forEach(({ id, btnId }) => {
-    const btn = document.getElementById(btnId);
-    if (!btn) return;
-    const card = btn.closest('.skin-card');
-    if (owned.includes(id)) {
-      btn.textContent = 'Owned ✓';
-      btn.style.background = 'rgba(46,204,113,0.15)';
-      btn.style.color = '#2ecc71';
-      btn.style.cursor = 'default';
-      if (card && !card.querySelector('.owned-ribbon')) {
-        const ribbon = document.createElement('div');
-        ribbon.className = 'owned-ribbon';
-        ribbon.style.cssText = 'position:absolute;top:12px;left:12px;background:rgba(46,204,113,0.9);color:#080809;font-size:10px;font-weight:800;padding:4px 10px;border-radius:6px;z-index:2';
-        ribbon.textContent = 'OWNED';
-        if (card.style.position !== 'relative') card.style.position = 'relative';
-        card.prepend(ribbon);
-      }
-    } else {
-      btn.textContent = 'Buy Now';
-      btn.style.background = '';
-      btn.style.color = '';
-      btn.style.cursor = 'pointer';
-      const ribbon = card?.querySelector('.owned-ribbon');
-      if (ribbon) ribbon.remove();
-    }
-  });
+// ═══════════════════════════════════════════
+// TRADER REP = number of verified handshakes (counted from completions)
+// ═══════════════════════════════════════════
+async function getRep(uid) {
+  const col = collection(db, 'completions');
+  const [asBuyer, asSeller] = await Promise.all([
+    getCountFromServer(query(col, where('buyerId', '==', uid))),
+    getCountFromServer(query(col, where('sellerId', '==', uid)))
+  ]);
+  return asBuyer.data().count + asSeller.data().count;
+}
+
+let repCache = { uid: null, at: 0 };
+async function refreshMyRep(force = false) {
+  if (!currentUser) return;
+  if (!force && repCache.uid === currentUser.uid && Date.now() - repCache.at < 30000) return;
+  repCache = { uid: currentUser.uid, at: Date.now() };
+  try {
+    const rep = await getRep(currentUser.uid);
+    ['dashTraderRep', 'portTraderRep', 'portStatRep'].forEach(id => setText(id, rep));
+  } catch (e) {
+    console.error('Rep load failed', e);
+  }
 }
 
 function updatePortfolioUI() {
@@ -301,9 +262,6 @@ function updatePortfolioUI() {
   setText('portName', currentUserData.displayName || currentUserData.username);
   setText('portHandle', '@' + currentUserData.username + ' · stash.app/u/' + currentUserData.username);
   setText('portBio', currentUserData.bio || 'Add a bio in your profile settings.');
-  setText('portTraderRep', currentUserData.traderRep || 0);
-  setText('portStatRep', currentUserData.traderRep || 0);
-  setText('portStatGB', (currentUserData.goldBlocks || 0) + ' GB');
 }
 
 function setText(id, val) {
@@ -403,7 +361,6 @@ function switchScreen(id) {
     if (id === 'leaderboard') loadLeaderboard();
     if (id === 'trades') loadTrades();
     if (id === 'portfolio') loadPortfolioListings();
-    if (id === 'admin' && currentUserData?.isAdmin) loadAdminData();
   }, 220);
 
   document.querySelectorAll('.snav').forEach(n => n.classList.toggle('active', n.dataset.screen === id));
@@ -619,7 +576,7 @@ function renderMarketplace() {
 
     const actionBtn = isMine
       ? `<button class="reserve-btn" style="background:var(--glass-gold);color:var(--gold)" onclick="openEditListing('${l.id}')"><i class="ti ti-pencil" style="margin-right:4px"></i>Edit Listing</button>`
-      : `<button class="reserve-btn" onclick="openSheet('${l.id}')" ${l.status === 'reserved' ? 'disabled' : ''}>${l.status === 'reserved' ? 'Reserved' : 'Inquire / Reserve'}</button>`;
+      : `<button class="reserve-btn" onclick="openSheet('${l.id}')" ${l.status === 'reserved' ? 'disabled' : ''}>${l.status === 'reserved' ? 'Reserved' : 'View & Contact'}</button>`;
 
     return `
       <div class="listing-card" style="${isMine ? 'border-color:rgba(212,160,23,0.35)' : ''}">
@@ -657,6 +614,7 @@ async function loadLeaderboard() {
   );
   const snap = await getDocs(q);
   const users = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  await Promise.all(users.map(async u => { try { u.repCount = await getRep(u.id); } catch { u.repCount = 0; } }));
   renderLeaderboard(users);
 }
 
@@ -689,7 +647,7 @@ function renderLeaderboard(users) {
         <div class="podium-name">${escHtml(u.displayName || u.username)}</div>
         <div class="podium-handle">@${escHtml(u.username)}</div>
         <div class="podium-value">SCR ${Number(u.portfolioValue || 0).toLocaleString()}</div>
-        <div style="font-size:12px;color:var(--text-muted);margin-top:4px">Rep: ${u.traderRep || 0}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:4px">Rep: ${u.repCount || 0}</div>
       </div>`;
   }).join('');
 
@@ -708,7 +666,7 @@ function renderLeaderboard(users) {
         </div>
         <div style="text-align:right">
           <div class="lb-value">SCR ${Number(u.portfolioValue || 0).toLocaleString()}</div>
-          <div class="lb-change">Rep: ${u.traderRep || 0}</div>
+          <div class="lb-change">Rep: ${u.repCount || 0}</div>
         </div>
       </div>`;
   }).join('');
@@ -795,50 +753,9 @@ function openListingModal() {
   editingListingId = null;
   document.querySelector('#listingModal .modal-title').textContent = 'List an Item';
   document.querySelector('#listingModal .modal-btn').textContent = 'List Item ✦';
-  refreshFrameDropdownOwnership();
   document.getElementById('listingModal').classList.add('open');
 }
 
-function refreshFrameDropdownOwnership() {
-  const owned = currentUserData?.ownedFrames || ['default'];
-  const frameMap = {
-    default: { label: '⬜ Default (Free)', emoji: '⬜' },
-    gold: { label: '🟨 Liquid Gold Frame', emoji: '🟨' },
-    holo: { label: '🌈 Holographic Foil', emoji: '🌈' },
-    purple: { label: '💜 Royal Purple', emoji: '💜' },
-    carbon: { label: '🖤 Carbon Fiber', emoji: '🖤' },
-    neon: { label: '💚 Neon Grid', emoji: '💚' }
-  };
-  const dropdown = document.querySelector('#csFrame .cs-dropdown');
-  if (!dropdown) return;
-
-  dropdown.querySelectorAll('.cs-option').forEach(opt => {
-    const onclickAttr = opt.getAttribute('onclick') || '';
-    const match = onclickAttr.match(/'([a-z]+)',/);
-    if (!match) return;
-    const frameId = match[1];
-    const isOwned = owned.includes(frameId);
-
-    if (!isOwned) {
-      opt.style.opacity = '0.35';
-      opt.style.pointerEvents = 'none';
-      opt.setAttribute('data-locked', 'true');
-      if (!opt.querySelector('.cs-lock-badge')) {
-        const badge = document.createElement('span');
-        badge.className = 'cs-lock-badge';
-        badge.style.cssText = 'margin-left:auto;font-size:10px;color:var(--text-muted);display:flex;align-items:center;gap:3px';
-        badge.innerHTML = '<i class="ti ti-lock" style="font-size:12px"></i> Shop';
-        opt.appendChild(badge);
-      }
-    } else {
-      opt.style.opacity = '1';
-      opt.style.pointerEvents = 'auto';
-      opt.removeAttribute('data-locked');
-      const badge = opt.querySelector('.cs-lock-badge');
-      if (badge) badge.remove();
-    }
-  });
-}
 
 async function openEditListing(listingId) {
   const snap = await getDoc(doc(db, 'listings', listingId));
@@ -878,9 +795,7 @@ async function openEditListing(listingId) {
   selectCS('csIntent', 'listingIntent', l.intent || 'trade', intentLabels[l.intent || 'trade']);
 
   // Set frame via custom dropdown
-  const frameLabels = { default: '⬜ Default (Free)', gold: '🟨 Liquid Gold Frame', holo: '🌈 Holographic Foil', purple: '💜 Royal Purple', carbon: '🖤 Carbon Fiber', neon: '💚 Neon Grid' };
-  selectCS('csFrame', 'listingFrame', l.frame || 'default', frameLabels[l.frame || 'default']);
-  refreshFrameDropdownOwnership();
+  document.getElementById('listingFrame').value = l.frame || 'default';
 
   // Image preview
   const preview = document.getElementById('uploadPreview');
@@ -920,7 +835,6 @@ function triggerUpload() {
 
 async function submitListing() {
   if (!currentUser || !currentUserData) return;
-  if (currentUserData.accountLocked) return showToast('Account restricted. Settle your debt first.', 'error');
 
   const name = document.getElementById('listingName').value.trim();
   const price = parseFloat(document.getElementById('listingPrice').value);
@@ -1072,98 +986,60 @@ function closeSheet() {
   currentSheetListing = null;
 }
 
-async function reserveItem() {
-  if (!currentUser || !currentSheetListing) return;
-  if (!currentUserData) return showToast('User data not loaded', 'error');
-
-  const ESCROW_COST = 100; // GB required to reserve
-  if (currentUserData.goldBlocks < ESCROW_COST) {
-    return showToast(`You need ${ESCROW_COST} GB to reserve an item. Visit the Exotic Shop to buy Gold Blocks.`, 'error');
-  }
-
-  try {
-    const lockEscrowFn = httpsCallable(functions, 'lockEscrow');
-    await lockEscrowFn({ listingId: currentSheetListing.id, goldBlockAmount: ESCROW_COST });
-    closeSheet();
-    showToast('Item reserved! Go to My Trades to manage the handshake.', 'success');
-    switchScreen('trades');
-  } catch (err) {
-    showToast('Error reserving item: ' + err.message, 'error');
-  }
-}
 
 // ═══════════════════════════════════════════
 // TRADES SCREEN
 // ═══════════════════════════════════════════
 async function loadTrades() {
   if (!currentUser) return;
+  const list = document.getElementById('handshakeList');
+  if (!list) return;
 
-  // Active trades (as buyer or seller)
-  const buyerQ = query(collection(db, 'trades'), where('buyerId', '==', currentUser.uid), where('status', '==', 'pending'));
-  const sellerQ = query(collection(db, 'trades'), where('sellerId', '==', currentUser.uid), where('status', '==', 'pending'));
+  try {
+    const col = collection(db, 'completions');
+    const [boughtSnap, soldSnap] = await Promise.all([
+      getDocs(query(col, where('buyerId', '==', currentUser.uid))),
+      getDocs(query(col, where('sellerId', '==', currentUser.uid)))
+    ]);
 
-  const [buyerSnap, sellerSnap] = await Promise.all([getDocs(buyerQ), getDocs(sellerQ)]);
-  const trades = [
-    ...buyerSnap.docs.map(d => ({ id: d.id, role: 'buyer', ...d.data() })),
-    ...sellerSnap.docs.map(d => ({ id: d.id, role: 'seller', ...d.data() }))
-  ];
+    const items = [
+      ...boughtSnap.docs.map(d => ({ role: 'buyer', otherId: d.data().sellerId, at: d.data().createdAt })),
+      ...soldSnap.docs.map(d => ({ role: 'seller', otherId: d.data().buyerId, at: d.data().createdAt }))
+    ]
+      .sort((a, b) => (b.at?.toMillis?.() || 0) - (a.at?.toMillis?.() || 0))
+      .slice(0, 20);
 
-  const tradesList = document.getElementById('activeTradesList');
-  if (!tradesList) return;
+    if (items.length === 0) {
+      list.innerHTML = `<div class="empty-state"><div class="empty-icon">&#129309;</div><div class="empty-title">No Handshakes Yet</div><div class="empty-sub">After a sale or trade in person, verify it with a QR handshake to earn Trader Rep.</div></div>`;
+      return;
+    }
 
-  if (trades.length === 0) {
-    tradesList.innerHTML = `<div class="empty-state"><div class="empty-icon">🔄</div><div class="empty-title">No Active Trades</div><div class="empty-sub">When you reserve an item or someone reserves yours, trades appear here.</div></div>`;
-  } else {
-    tradesList.innerHTML = trades.map(t => {
-      const expiresAt = t.expiresAt?.toDate ? t.expiresAt.toDate() : new Date(t.expiresAt);
-      const timeLeft = Math.max(0, expiresAt - Date.now());
-      const hours = Math.floor(timeLeft / 3600000);
-      const mins = Math.floor((timeLeft % 3600000) / 60000);
-      const isSeller = t.role === 'seller';
+    const names = {};
+    await Promise.all([...new Set(items.map(i => i.otherId))].map(async uid => {
+      try {
+        const snap = await getDoc(doc(db, 'users', uid));
+        names[uid] = snap.exists() ? snap.data().username : 'unknown';
+      } catch {
+        names[uid] = 'unknown';
+      }
+    }));
+
+    list.innerHTML = items.map(i => {
+      const when = i.at?.toDate ? i.at.toDate().toLocaleDateString() : '';
+      const who = escHtml(names[i.otherId] || 'unknown');
+      const label = i.role === 'seller' ? `Sold / traded to @${who}` : `Bought / traded from @${who}`;
       return `
-        <div class="glass-card" style="margin-bottom:12px">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-            <div>
-              <div style="font-size:14px;font-weight:700">Trade #${t.id.substring(0,8)}</div>
-              <div style="font-size:12px;color:var(--text-muted)">You are the ${t.role}</div>
-            </div>
-            <div style="text-align:right">
-              <div style="font-size:13px;font-weight:700;color:var(--gold)">${hours}h ${mins}m remaining</div>
-              <div class="intent-tag tag-trade">Pending QR Scan</div>
-            </div>
+        <div class="glass-card" style="margin-bottom:10px;display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-size:14px;font-weight:700">${label}</div>
+            <div style="font-size:12px;color:var(--text-muted)">${when}</div>
           </div>
-          <div style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
-            🟨 ${t.goldBlocksLocked} GB locked as collateral — refunded on successful handshake
-          </div>
-          ${isSeller
-            ? `<button class="modal-btn" onclick="openQRModal('${t.id}','seller')">Generate QR Code</button>`
-            : `<button class="modal-btn" onclick="openQRModal('${t.id}','buyer')">Scan Seller QR</button>`
-          }
+          <div style="font-size:13px;font-weight:800;color:var(--gold)">+1 Rep</div>
         </div>`;
     }).join('');
-  }
-
-  // Debt ledger
-  const debtQ = query(collection(db, 'debtLedger'), where('userId', '==', currentUser.uid), where('status', '==', 'unpaid'));
-  const debtSnap = await getDocs(debtQ);
-  const debts = debtSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-  const debtList = document.getElementById('debtLedgerList');
-  if (debtList) {
-    if (debts.length === 0) {
-      debtList.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-muted);font-size:13px">No outstanding debts. You're all clear ✓</div>`;
-    } else {
-      debtList.innerHTML = debts.map(d => `
-        <div class="glass-card" style="margin-bottom:10px;border-color:rgba(255,77,77,0.3)">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <div>
-              <div style="font-size:14px;font-weight:700;color:var(--red)">Unpaid Platform Fee</div>
-              <div style="font-size:12px;color:var(--text-muted)">Trade: ${d.tradeId?.substring(0,8) || 'N/A'}</div>
-            </div>
-            <div style="font-size:18px;font-weight:800;color:var(--red)">SCR ${Number(d.amountSCR || 0).toFixed(2)}</div>
-          </div>
-          <div style="font-size:12px;color:var(--text-muted);margin-top:8px">Contact admin to settle this debt and unlock your account.</div>
-        </div>`).join('');
-    }
+  } catch (err) {
+    console.error(err);
+    list.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-muted);font-size:13px">Couldn't load handshakes. Try again in a moment.</div>`;
   }
 }
 
@@ -1172,9 +1048,16 @@ async function loadTrades() {
 // ═══════════════════════════════════════════
 let qrInstance = null;
 let qrTimerInterval = null;
+let qrUnsub = null;
+
+function makeToken() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+}
 let qrScannerInstance = null;
 
-async function openQRModal(tradeId, role) {
+async function openQRModal(role) {
   document.getElementById('qrModal').classList.add('open');
   const sellerView = document.getElementById('qrSellerView');
   const buyerView = document.getElementById('qrBuyerView');
@@ -1184,9 +1067,27 @@ async function openQRModal(tradeId, role) {
     sellerView.style.display = 'block';
     buyerView.style.display = 'none';
     try {
-      const generateQRFn = httpsCallable(functions, 'generateQR');
-      const result = await generateQRFn({ tradeId });
-      const { payload, expiresAt } = result.data;
+      const token = makeToken();
+      const hsRef = doc(collection(db, 'handshakes'));
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+      await setDoc(hsRef, {
+        sellerId: currentUser.uid,
+        token,
+        createdAt: serverTimestamp(),
+        expiresAt: Timestamp.fromDate(expiresAt)
+      });
+      const payload = JSON.stringify({ h: hsRef.id, s: currentUser.uid, t: token });
+
+      // Close automatically once the buyer completes the handshake
+      if (qrUnsub) qrUnsub();
+      qrUnsub = onSnapshot(doc(db, 'completions', hsRef.id), snap => {
+        if (snap.exists()) {
+          closeQRModal();
+          showToast('🎉 Handshake complete! +1 Trader Rep', 'success');
+          refreshMyRep(true);
+          loadTrades();
+        }
+      });
       // Generate QR code
       const qrDisplay = document.getElementById('qrCodeDisplay');
       qrDisplay.innerHTML = '';
@@ -1231,31 +1132,48 @@ async function openQRModal(tradeId, role) {
 }
 
 async function handleQRScan(payload) {
-  showToast('QR detected. Running verification...', 'info');
+  showToast('QR detected. Verifying...', 'info');
   try {
-    // Get GPS
-    const gps = await new Promise((res, rej) =>
-      navigator.geolocation.getCurrentPosition(
-        p => res({ lat: p.coords.latitude, lng: p.coords.longitude }),
-        () => res(null),
-        { enableHighAccuracy: true, timeout: 5000 }
-      )
-    );
+    let parsed;
+    try { parsed = JSON.parse(payload); } catch { throw new Error("That QR code isn't valid."); }
+    const { h, s: sellerId, t: token } = parsed || {};
+    if (typeof h !== 'string' || typeof sellerId !== 'string' || typeof token !== 'string') {
+      throw new Error("That QR code isn't valid.");
+    }
+    if (sellerId === currentUser.uid) throw new Error("You can't scan your own QR code.");
 
-    const verifyFn = httpsCallable(functions, 'verifyQRScan');
-    await verifyFn({
-      qrPayload: payload,
-      scanData: {
-        buyerGPS: gps,
-        buyerDeviceId: await getDeviceId(),
-        buyerIP: null // handled server-side
-      }
+    const buyerId = currentUser.uid;
+    const d = new Date();
+    const dayKey = `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`;
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'completions', h), {
+      buyerId,
+      sellerId,
+      token,
+      createdAt: serverTimestamp()
     });
+    batch.set(doc(db, 'pairDays', `${sellerId}_${buyerId}_${dayKey}`), {
+      hid: h,
+      buyerId,
+      sellerId
+    });
+
+    try {
+      await batch.commit();
+    } catch (err) {
+      if (err.code === 'permission-denied') {
+        throw new Error('Could not verify. The QR may have expired or been used, or you already shook hands with this person today.');
+      }
+      throw err;
+    }
+
     closeQRModal();
-    showToast('🎉 Trade verified! Gold Blocks refunded.', 'success');
+    showToast('🎉 Handshake verified! +1 Trader Rep', 'success');
+    refreshMyRep(true);
     loadTrades();
   } catch (err) {
-    showToast('Verification failed: ' + err.message, 'error');
+    showToast(err.message, 'error');
     closeQRModal();
   }
 }
@@ -1263,357 +1181,10 @@ async function handleQRScan(payload) {
 function closeQRModal() {
   document.getElementById('qrModal').classList.remove('open');
   if (qrTimerInterval) clearInterval(qrTimerInterval);
+  if (qrUnsub) { qrUnsub(); qrUnsub = null; }
   if (qrScannerInstance) qrScannerInstance.stop().catch(() => {});
   qrInstance = null;
   qrScannerInstance = null;
-}
-
-async function getDeviceId() {
-  const stored = localStorage.getItem('stash_device_id');
-  if (stored) return stored;
-  const id = crypto.randomUUID();
-  localStorage.setItem('stash_device_id', id);
-  return id;
-}
-
-// ═══════════════════════════════════════════
-// SLIDE TO PAY
-// ═══════════════════════════════════════════
-let slideSkinName = '';
-let slideSkinCost = 0;
-let slideFrameId = '';
-
-function openSlideModal(name, cost, frameId) {
-  slideSkinName = name;
-  slideSkinCost = cost;
-  slideFrameId = frameId;
-
-  const ownedFrames = currentUserData?.ownedFrames || ['default'];
-  if (ownedFrames.includes(frameId)) {
-    showToast('You already own this frame!', 'info');
-    return;
-  }
-
-  setText('slideTitle', name);
-  setText('slidePrice', cost.toLocaleString() + ' GB');
-
-  document.getElementById('slideAlreadyOwned').style.display = 'none';
-  document.getElementById('slidePurchaseFlow').style.display = 'block';
-  document.getElementById('slideWrap').style.display = '';
-  document.getElementById('slideSuccess').style.display = 'none';
-  document.getElementById('slideThumb').style.transform = 'translateX(0)';
-  document.getElementById('slideThumb').innerHTML = '→';
-  setText('slideTextEl', 'Slide to Confirm');
-  document.getElementById('slideTextEl').style.opacity = '1';
-  initSlide();
-
-  document.getElementById('slideModal').classList.add('open');
-}
-
-function closeSlideModal() {
-  document.getElementById('slideModal').classList.remove('open');
-  const canvas = document.getElementById('particleCanvas');
-  if (canvas) {
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-  }
-}
-
-function initSlide() {
-  const wrap = document.getElementById('slideWrap');
-  const thumb = document.getElementById('slideThumb');
-  const textEl = document.getElementById('slideTextEl');
-  const track = wrap.querySelector('.slide-track');
-
-  // Clone to strip any old listeners from previous opens
-  const newWrap = wrap.cloneNode(true);
-  wrap.parentNode.replaceChild(newWrap, wrap);
-  const nw = document.getElementById('slideWrap');
-  const nt = nw.querySelector('.slide-thumb');
-  const ntxt = nw.querySelector('.slide-text');
-  const ntrack = nw.querySelector('.slide-track');
-
-  let dragging = false;
-  let startX = 0;
-  let completed = false;
-
-  const getMax = () => ntrack.offsetWidth - nt.offsetWidth;
-  const getCurrentX = () => {
-    const t = nt.style.transform;
-    const match = t.match(/translateX\(([-\d.]+)px\)/);
-    return match ? parseFloat(match[1]) : 0;
-  };
-
-  function onStart(e) {
-    if (completed) return;
-    dragging = true;
-    nt.style.transition = 'none';
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    startX = clientX - getCurrentX();
-  }
-
-  function onMove(e) {
-    if (!dragging || completed) return;
-    e.preventDefault();
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    const max = getMax();
-    let x = clientX - startX;
-    x = Math.max(0, Math.min(x, max));
-    nt.style.transform = `translateX(${x}px)`;
-    ntxt.style.opacity = String(Math.max(0, 1 - (x / max) * 1.4));
-    if (x >= max * 0.9 && !completed) {
-      onComplete();
-    }
-  }
-
-  function onEnd() {
-    if (!dragging || completed) return;
-    dragging = false;
-    const max = getMax();
-    if (getCurrentX() < max * 0.9) {
-      nt.style.transition = 'transform 0.3s cubic-bezier(0.4,0,0.2,1)';
-      nt.style.transform = 'translateX(0)';
-      ntxt.style.opacity = '1';
-    }
-  }
-
-  async function onComplete() {
-    if (completed) return;
-    completed = true;
-    dragging = false;
-
-    const max = getMax();
-    nt.style.transition = 'transform 0.2s ease';
-    nt.style.transform = `translateX(${max}px)`;
-    nt.innerHTML = '✓';
-
-    if (!currentUser || !currentUserData) {
-      showToast('You must be logged in', 'error');
-      completed = false;
-      return;
-    }
-
-    // Double-check ownership server-side before charging (prevents duplicate buys)
-    if ((currentUserData.ownedFrames || []).includes(slideFrameId)) {
-      showToast('You already own this frame!', 'info');
-      closeSlideModal();
-      return;
-    }
-
-    if (currentUserData.goldBlocks < slideSkinCost) {
-      showToast('Not enough Gold Blocks!', 'error');
-      setTimeout(() => {
-        nt.style.transition = 'transform 0.3s';
-        nt.style.transform = 'translateX(0)';
-        nt.innerHTML = '→';
-        ntxt.style.opacity = '1';
-        completed = false;
-      }, 600);
-      return;
-    }
-
-    try {
-      await updateDoc(doc(db, 'users', currentUser.uid), {
-        goldBlocks: increment(-slideSkinCost),
-        ownedFrames: arrayUnion(slideFrameId)
-      });
-      await addDoc(collection(db, 'gbTransactions'), {
-        userId: currentUser.uid,
-        amount: -slideSkinCost,
-        type: 'skin_purchase',
-        skinName: slideSkinName,
-        frameId: slideFrameId,
-        createdAt: serverTimestamp()
-      });
-
-      fireParticleBurst();
-
-      setTimeout(() => {
-        document.getElementById('slideWrap').style.display = 'none';
-        document.getElementById('slideSuccess').style.display = 'block';
-        setTimeout(closeSlideModal, 2200);
-      }, 250);
-
-      showToast(`${slideSkinName} unlocked!`, 'success');
-    } catch (err) {
-      showToast('Purchase failed: ' + err.message, 'error');
-      nt.style.transition = 'transform 0.3s';
-      nt.style.transform = 'translateX(0)';
-      nt.innerHTML = '→';
-      ntxt.style.opacity = '1';
-      completed = false;
-    }
-  }
-
-  nw.addEventListener('mousedown', onStart);
-  nw.addEventListener('touchstart', onStart, { passive: false });
-  window.addEventListener('mousemove', onMove);
-  window.addEventListener('touchmove', onMove, { passive: false });
-  window.addEventListener('mouseup', onEnd);
-  window.addEventListener('touchend', onEnd);
-}
-
-// ═══════════════════════════════════════════
-// PARTICLE BURST EFFECT (canvas confetti)
-// ═══════════════════════════════════════════
-function fireParticleBurst() {
-  const canvas = document.getElementById('particleCanvas');
-  if (!canvas) return;
-  const modal = canvas.closest('.modal-sheet');
-  const rect = modal.getBoundingClientRect();
-  canvas.width = rect.width;
-  canvas.height = rect.height;
-  const ctx = canvas.getContext('2d');
-
-  const colors = ['#D4A017', '#F5C842', '#FFD700', '#fff', '#FFA500'];
-  const particles = [];
-  const count = 60;
-  const originX = rect.width / 2;
-  const originY = rect.height / 2;
-
-  for (let i = 0; i < count; i++) {
-    const angle = (Math.PI * 2 * i) / count + Math.random() * 0.5;
-    const speed = 3 + Math.random() * 6;
-    particles.push({
-      x: originX,
-      y: originY,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed - 2,
-      size: 3 + Math.random() * 4,
-      color: colors[Math.floor(Math.random() * colors.length)],
-      life: 1,
-      decay: 0.012 + Math.random() * 0.012,
-      rotation: Math.random() * Math.PI * 2,
-      rotSpeed: (Math.random() - 0.5) * 0.3,
-      shape: Math.random() > 0.5 ? 'square' : 'circle'
-    });
-  }
-
-  let frame = 0;
-  const maxFrames = 120;
-
-  function animate() {
-    frame++;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    let alive = false;
-    particles.forEach(p => {
-      if (p.life <= 0) return;
-      alive = true;
-      p.x += p.vx;
-      p.y += p.vy;
-      p.vy += 0.15; // gravity
-      p.vx *= 0.99;
-      p.life -= p.decay;
-      p.rotation += p.rotSpeed;
-
-      ctx.save();
-      ctx.globalAlpha = Math.max(0, p.life);
-      ctx.translate(p.x, p.y);
-      ctx.rotate(p.rotation);
-      ctx.fillStyle = p.color;
-      if (p.shape === 'square') {
-        ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
-      } else {
-        ctx.beginPath();
-        ctx.arc(0, 0, p.size / 2, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.restore();
-    });
-
-    if (alive && frame < maxFrames) {
-      requestAnimationFrame(animate);
-    } else {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-    }
-  }
-
-  requestAnimationFrame(animate);
-}
-
-// ═══════════════════════════════════════════
-// ADMIN PANEL
-// ═══════════════════════════════════════════
-async function adminCreditGB() {
-  const username = document.getElementById('adminUsername').value.trim().replace('@','');
-  const amount = parseInt(document.getElementById('adminGBAmount').value);
-  const note = document.getElementById('adminNote').value.trim();
-  if (!username || !amount) return showToast('Fill in all fields', 'error');
-
-  try {
-    const creditFn = httpsCallable(functions, 'adminCreditGoldBlocks');
-    // Find user by username
-    const userSnap = await getDocs(query(collection(db, 'users'), where('username', '==', username)));
-    if (userSnap.empty) return showToast('User not found', 'error');
-    const userId = userSnap.docs[0].id;
-    await creditFn({ userId, amount, note });
-    showToast(`Credited ${amount} GB to @${username}`, 'success');
-  } catch (err) { showToast('Error: ' + err.message, 'error'); }
-}
-
-async function adminSettleDebt() {
-  const username = document.getElementById('adminDebtUsername').value.trim().replace('@','');
-  const debtId = document.getElementById('adminDebtId').value.trim();
-  if (!username || !debtId) return showToast('Fill in all fields', 'error');
-
-  try {
-    const settleFn = httpsCallable(functions, 'settleDebt');
-    const userSnap = await getDocs(query(collection(db, 'users'), where('username', '==', username)));
-    if (userSnap.empty) return showToast('User not found', 'error');
-    const userId = userSnap.docs[0].id;
-    const result = await settleFn({ userId, debtId });
-    showToast(result.data.accountUnlocked ? 'Debt settled & account unlocked!' : 'Debt settled', 'success');
-  } catch (err) { showToast('Error: ' + err.message, 'error'); }
-}
-
-async function loadAdminData() {
-  try {
-    const [usersSnap, listingsSnap, tradesSnap, debtsSnap] = await Promise.all([
-      getDocs(collection(db, 'users')),
-      getDocs(query(collection(db, 'listings'), where('status', '==', 'active'))),
-      getDocs(query(collection(db, 'trades'), where('status', '==', 'completed'))),
-      getDocs(query(collection(db, 'debtLedger'), where('status', '==', 'unpaid')))
-    ]);
-    setText('adminTotalUsers', usersSnap.size);
-    setText('adminTotalListings', listingsSnap.size);
-    setText('adminTotalTrades', tradesSnap.size);
-
-    const debts = debtsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-    const adminDebtList = document.getElementById('adminDebtList');
-    if (adminDebtList) {
-      adminDebtList.innerHTML = debts.length === 0
-        ? `<div style="text-align:center;padding:40px;color:var(--text-muted)">No pending debts</div>`
-        : debts.map(d => `
-          <div class="glass-card" style="margin-bottom:10px">
-            <div style="display:flex;justify-content:space-between;align-items:center">
-              <div>
-                <div style="font-size:13px;font-weight:700">User: ${d.userId?.substring(0,12)}...</div>
-                <div style="font-size:11px;color:var(--text-muted)">Debt ID: ${d.id}</div>
-              </div>
-              <div style="font-size:16px;font-weight:800;color:var(--red)">SCR ${Number(d.amountSCR || 0).toFixed(2)}</div>
-            </div>
-          </div>`).join('');
-    }
-  } catch (err) { showToast('Admin load error: ' + err.message, 'error'); }
-}
-
-// ═══════════════════════════════════════════
-// COUNTDOWN TIMER (Exotic Shop)
-// ═══════════════════════════════════════════
-function startCountdown() {
-  const nextMidnight = new Date();
-  nextMidnight.setHours(24, 0, 0, 0);
-
-  setInterval(() => {
-    const left = Math.max(0, nextMidnight - Date.now());
-    const h = Math.floor(left / 3600000);
-    const m = Math.floor((left % 3600000) / 60000);
-    const s = Math.floor((left % 60000) / 1000);
-    setText('cd-h', String(h).padStart(2,'0'));
-    setText('cd-m', String(m).padStart(2,'0'));
-    setText('cd-s', String(s).padStart(2,'0'));
-  }, 1000);
 }
 
 // ═══════════════════════════════════════════
@@ -1727,7 +1298,6 @@ function drawerNav(screenId) {
 function updateDrawerUI() {
   if (!currentUserData) return;
   const initials = (currentUserData.displayName || currentUserData.username || 'U').substring(0,2).toUpperCase();
-  const gbDisplay = Number(currentUserData.goldBlocks || 0).toLocaleString() + ' GB';
 
   const drawerAvatar = document.getElementById('drawerAvatar');
   if (drawerAvatar) {
@@ -1738,10 +1308,8 @@ function updateDrawerUI() {
   }
   const drawerName = document.getElementById('drawerName');
   const drawerHandle = document.getElementById('drawerHandle');
-  const drawerGB = document.getElementById('drawerGBBalance');
   if (drawerName) drawerName.textContent = currentUserData.displayName || currentUserData.username;
   if (drawerHandle) drawerHandle.textContent = '@' + currentUserData.username;
-  if (drawerGB) drawerGB.textContent = gbDisplay;
 
   // Show admin nav in drawer if admin
   if (currentUserData.isAdmin) {
@@ -1874,7 +1442,6 @@ document.addEventListener('click', (e) => {
 
 // ── Close modals on overlay click
 document.getElementById('sheetOverlay')?.addEventListener('click', e => { if (e.target === document.getElementById('sheetOverlay')) closeSheet(); });
-document.getElementById('slideModal')?.addEventListener('click', e => { if (e.target === document.getElementById('slideModal')) closeSlideModal(); });
 document.getElementById('listingModal')?.addEventListener('click', e => { if (e.target === document.getElementById('listingModal')) closeListingModal(); });
 document.getElementById('editProfileModal')?.addEventListener('click', e => { if (e.target === document.getElementById('editProfileModal')) closeEditProfile(); });
 document.getElementById('confirmDeleteModal')?.addEventListener('click', e => { if (e.target === document.getElementById('confirmDeleteModal')) closeConfirmDelete(); });
@@ -1900,13 +1467,8 @@ window.deleteListing = deleteListing;
 window.updateSpecFields = updateSpecFields;
 window.openSheet = openSheet;
 window.closeSheet = closeSheet;
-window.reserveItem = reserveItem;
 window.openQRModal = openQRModal;
 window.closeQRModal = closeQRModal;
-window.openSlideModal = openSlideModal;
-window.closeSlideModal = closeSlideModal;
-window.adminCreditGB = adminCreditGB;
-window.adminSettleDebt = adminSettleDebt;
 window.copyProfileLink = copyProfileLink;
 window.showToast = showToast;
 window.openEditProfile = openEditProfile;

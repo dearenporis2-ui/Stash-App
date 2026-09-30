@@ -2,48 +2,155 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // ─── Helpers ───
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data;
+    }
+
+    // Only allow empty or Cloudinary image URLs (blocks script injection via URLs)
+    function validImage(url) {
+      return url is string
+        && (url == '' || url.matches('https://res\\.cloudinary\\.com/dflbqacnt/.*'));
+    }
+
+    // UTC date, e.g. 2026-9-30 (used to limit handshakes per pair per day)
+    function dayKey() {
+      return string(request.time.year()) + '-'
+        + string(request.time.month()) + '-'
+        + string(request.time.day());
+    }
+
     // ─── Users ───
     match /users/{userId} {
-      allow read: if request.auth != null;
-      allow create: if request.auth != null
-        && request.resource.data.isAdmin == false; // can never self-register as admin
-      allow update: if request.auth != null && request.auth.uid == userId
-        // Block any update that tries to change isAdmin, unless it's already true (admin editing own doc)
-        && (request.resource.data.isAdmin == resource.data.isAdmin);
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly([
+             'uid', 'username', 'displayName', 'bio',
+             'avatarUrl', 'portfolioValue', 'createdAt'
+           ])
+        && request.resource.data.uid == userId
+        && request.resource.data.username is string
+        && request.resource.data.username.size() > 0
+        && request.resource.data.username.size() <= 30
+        && request.resource.data.portfolioValue == 0
+        && request.resource.data.createdAt == request.time
+        && validImage(request.resource.data.get('avatarUrl', ''));
+
+      // Users can only edit these profile fields, nothing else
+      allow update: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['displayName', 'bio', 'avatarUrl', 'portfolioValue'])
+        && validImage(request.resource.data.get('avatarUrl', ''))
+        && request.resource.data.get('displayName', '').size() <= 40
+        && request.resource.data.get('bio', '').size() <= 300
+        && request.resource.data.get('portfolioValue', 0) is number;
+
+      allow delete: if false;
     }
 
     // ─── Listings ───
     match /listings/{listingId} {
-      allow read: if request.auth != null;
-      allow create: if request.auth != null;
-      allow update, delete: if request.auth != null
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly([
+             'name', 'priceSCR', 'category', 'intent', 'frame', 'description',
+             'imageUrl', 'specs', 'pinned', 'whatsapp', 'instagram',
+             'sellerId', 'sellerUsername', 'sellerDisplayName',
+             'status', 'createdAt'
+           ])
+        && request.resource.data.sellerId == request.auth.uid
+        && request.resource.data.sellerUsername == userDoc(request.auth.uid).username
+        && request.resource.data.status == 'active'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 100
+        && request.resource.data.priceSCR is number
+        && request.resource.data.priceSCR > 0
+        && request.resource.data.priceSCR < 10000000
+        && validImage(request.resource.data.get('imageUrl', ''));
+
+      allow update: if signedIn()
+        && resource.data.sellerId == request.auth.uid
+        && !request.resource.data.diff(resource.data).affectedKeys()
+             .hasAny(['sellerId', 'sellerUsername', 'status', 'createdAt'])
+        && request.resource.data.priceSCR is number
+        && request.resource.data.priceSCR > 0
+        && request.resource.data.priceSCR < 10000000
+        && validImage(request.resource.data.get('imageUrl', ''));
+
+      allow delete: if signedIn()
         && resource.data.sellerId == request.auth.uid;
     }
 
-    // ─── Trades ───
-    match /trades/{tradeId} {
-      allow read: if request.auth != null;
-      allow create: if request.auth != null;
-      allow update: if request.auth != null;
+    // ─── Handshakes: created by the seller, holds the secret QR token ───
+    // Only the seller can read it, so the token never reaches anyone else.
+    match /handshakes/{hid} {
+      allow read: if signedIn() && resource.data.sellerId == request.auth.uid;
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['sellerId', 'token', 'createdAt', 'expiresAt'])
+        && request.resource.data.sellerId == request.auth.uid
+        && request.resource.data.token is string
+        && request.resource.data.token.size() >= 32
+        && request.resource.data.token.size() <= 64
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.expiresAt > request.time
+        && request.resource.data.expiresAt <= request.time + duration.value(15, 'm');
+
+      allow update: if false;
+      allow delete: if signedIn() && resource.data.sellerId == request.auth.uid;
     }
 
-    // ─── Gold Block Transactions ───
-    match /gbTransactions/{txId} {
-      allow read: if request.auth != null
-        && resource.data.userId == request.auth.uid;
-      allow create: if request.auth != null;
+    // ─── Completions: created by the buyer when they scan the seller's QR ───
+    // The doc id equals the handshake id, so each QR can only be used once.
+    // The rules check the token against the seller's secret handshake doc.
+    match /completions/{hid} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['buyerId', 'sellerId', 'token', 'createdAt'])
+        && request.resource.data.buyerId == request.auth.uid
+        && request.resource.data.sellerId != request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && exists(/databases/$(database)/documents/handshakes/$(hid))
+        && get(/databases/$(database)/documents/handshakes/$(hid)).data.sellerId
+             == request.resource.data.sellerId
+        && get(/databases/$(database)/documents/handshakes/$(hid)).data.token
+             == request.resource.data.token
+        && get(/databases/$(database)/documents/handshakes/$(hid)).data.expiresAt
+             > request.time
+        // must be written together with today's pair marker (max 1 per pair per day)
+        && existsAfter(/databases/$(database)/documents/pairDays/$(
+             request.resource.data.sellerId + '_' + request.resource.data.buyerId + '_' + dayKey()
+           ));
+
+      allow update, delete: if false;
     }
 
-    // ─── Debt Ledger ───
-    match /debtLedger/{debtId} {
-      allow read: if request.auth != null;
-      allow write: if false;
-    }
+    // ─── Pair markers: one handshake per seller/buyer pair per day ───
+    match /pairDays/{pid} {
+      allow read: if false;
 
-    // ─── Admin ───
-    match /admin/{document=**} {
-      allow read, write: if request.auth != null
-        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['hid', 'buyerId', 'sellerId'])
+        && request.resource.data.buyerId == request.auth.uid
+        && pid == request.resource.data.sellerId + '_' + request.auth.uid + '_' + dayKey()
+        && existsAfter(/databases/$(database)/documents/completions/$(request.resource.data.hid))
+        && getAfter(/databases/$(database)/documents/completions/$(request.resource.data.hid)).data.buyerId
+             == request.auth.uid
+        && getAfter(/databases/$(database)/documents/completions/$(request.resource.data.hid)).data.sellerId
+             == request.resource.data.sellerId;
+
+      allow update, delete: if false;
     }
   }
 }
