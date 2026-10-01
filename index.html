@@ -177,6 +177,27 @@
   .price-new { color: #ff6b6b; }
   .sale-badge { display: inline-block; background: rgba(255,93,93,0.14); border: 1px solid rgba(255,93,93,0.4); color: #ff7a7a; font-size: 10px; font-weight: 800; letter-spacing: 0.5px; padding: 3px 8px; border-radius: 8px; margin-left: 8px; vertical-align: middle; }
   .sale-timer { display: block; font-size: 11px; color: #ff9a9a; font-weight: 600; margin-top: 4px; }
+  /* Dropdown lists: dark background + light text so options are readable without hovering */
+  select.modal-input {
+    color-scheme: dark;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    padding-right: 36px;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1.5l5 5 5-5' fill='none' stroke='%23D4A017' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 14px center;
+  }
+  select.modal-input option,
+  select.modal-input optgroup {
+    background-color: #151518;
+    color: #ffffff;
+  }
+  select.modal-input option:checked {
+    background-color: #2a2418;
+    color: #D4A017;
+  }
+  select.modal-input option[value=""] { color: #9a9aa0; }
   .platform-tag { font-size: 11px; font-weight: 700; color: var(--text-muted); margin: 2px 0 6px; }
 </style>
 </head>
