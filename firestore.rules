@@ -44,6 +44,17 @@ service cloud.firestore {
                            && d.discountEndsAt <= request.time + duration.value(8, 'd')))));
     }
 
+    function pad2(n) {
+      return n < 10 ? '0' + string(n) : string(n);
+    }
+
+    // Today's UTC date as YYYY-MM-DD (matches new Date().toISOString().slice(0, 10))
+    function todayKey() {
+      return string(request.time.year()) + '-'
+        + pad2(request.time.month()) + '-'
+        + pad2(request.time.day());
+    }
+
     // UTC date, e.g. 2026-9-30 (used to limit handshakes per pair per day)
     function dayKey() {
       return string(request.time.year()) + '-'
@@ -123,6 +134,24 @@ service cloud.firestore {
 
       allow delete: if signedIn()
         && resource.data.sellerId == request.auth.uid;
+    }
+
+    // ─── Portfolio value history: one doc per day (id = UTC date, YYYY-MM-DD) ───
+    // Values are reported by the app, so treat the chart as a personal tracker.
+    match /users/{userId}/valueHistory/{day} {
+      allow read: if signedIn();
+
+      allow create, update: if signedIn()
+        && request.auth.uid == userId
+        && day == todayKey()
+        && request.resource.data.keys().hasOnly(['day', 'value', 'updatedAt'])
+        && request.resource.data.day == day
+        && request.resource.data.value is number
+        && request.resource.data.value >= 0
+        && request.resource.data.value < 1000000000
+        && request.resource.data.updatedAt == request.time;
+
+      allow delete: if false;
     }
 
     // ─── Grail Hunts: public bounties ───

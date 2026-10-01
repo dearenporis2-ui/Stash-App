@@ -76,6 +76,12 @@ let openHuntAfterProfile = false;
 let huntsUnsub = null;
 let hunts = [];
 let huntFilter = 'all';
+let valueHistory = null;
+let valueRange = '30D';
+let lastSnapshot = { day: null, value: null };
+let weeklyTrendText = '';
+let valueLoading = false;
+let valueDirty = false;
 const HUNT_CATEGORIES = ['Watches', 'Sneakers', 'Tech', 'Jewelry', 'Cars', 'Bags', 'Games', 'Parts Bin', 'Other'];
 
 function cleanupListeners() {
@@ -83,6 +89,9 @@ function cleanupListeners() {
   unsubscribeListeners = [];
   marketUnsub = null;
   huntsUnsub = null;
+  valueHistory = null;
+  weeklyTrendText = '';
+  lastSnapshot = { day: null, value: null };
 }
 
 onAuthStateChanged(auth, async (user) => {
@@ -122,6 +131,7 @@ function enterMemberMode() {
   document.body.classList.remove('guest');
   showApp();
   initApp();
+  loadValueChart();
   const back = pendingSheetListing;
   pendingSheetListing = null;
   if (back) {
@@ -419,6 +429,228 @@ async function openHuntView(id) {
 function closeHuntView() {
   document.getElementById('huntViewModal').classList.remove('open');
 }
+
+// ═══════════════════════════════════════════
+// PORTFOLIO VALUE TRENDS
+// One snapshot per day (users/{uid}/valueHistory/YYYY-MM-DD), last value of the day wins.
+// ═══════════════════════════════════════════
+function todayKeyUTC() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function recordValueSnapshot(value) {
+  if (!currentUser || typeof value !== 'number' || isNaN(value)) return;
+  const day = todayKeyUTC();
+  if (lastSnapshot.day === day && lastSnapshot.value === value) return;
+  lastSnapshot = { day, value };
+  try {
+    await setDoc(doc(db, 'users', currentUser.uid, 'valueHistory', day), {
+      day,
+      value,
+      updatedAt: serverTimestamp()
+    });
+    valueHistory = null;                       // reload next time it's needed
+    loadValueChart();                          // refreshes the chart and the dashboard weekly change
+  } catch (e) {
+    lastSnapshot = { day: null, value: null };
+    console.error('Value snapshot failed', e);
+  }
+}
+
+// Points for a range. Adds a starting point (value carried over from before the range)
+// and a point for today, so the line always spans the whole range.
+function buildChartPoints(history, range, nowMs) {
+  if (!history || history.length === 0) return [];
+  const toT = day => Date.parse(day + 'T00:00:00Z');
+  const today = new Date(nowMs).toISOString().slice(0, 10);
+  let pts = history.map(p => ({ day: p.day, t: toT(p.day), value: p.value }));
+
+  if (range !== 'ALL') {
+    const days = range === '7D' ? 7 : 30;
+    const cutoff = new Date(nowMs - days * 86400000).toISOString().slice(0, 10);
+    const before = pts.filter(p => p.day < cutoff).pop();
+    pts = pts.filter(p => p.day >= cutoff);
+    if (before && (pts.length === 0 || pts[0].day > cutoff)) {
+      pts.unshift({ day: cutoff, t: toT(cutoff), value: before.value });
+    }
+  }
+  if (pts.length && pts[pts.length - 1].day < today) {
+    pts.push({ day: today, t: toT(today), value: pts[pts.length - 1].value });
+  }
+  return pts;
+}
+
+function fmtCompact(v) {
+  v = Math.round(v);
+  if (v >= 1e6) return (v / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (v >= 1e4) return Math.round(v / 1e3) + 'K';
+  if (v >= 1e3) return (v / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+  return String(v);
+}
+
+function describeChange(pts, label) {
+  if (pts.length < 2) return { text: '', cls: '' };
+  const from = pts[0].value;
+  const to = pts[pts.length - 1].value;
+  const diff = to - from;
+  if (diff === 0) return { text: `No change ${label}`, cls: '' };
+  const pct = from > 0 ? ` (${diff > 0 ? '+' : '−'}${Math.abs(diff / from * 100).toFixed(1)}%)` : '';
+  const arrow = diff > 0 ? '▲ +' : '▼ −';
+  return {
+    text: `${arrow}SCR ${Math.abs(diff).toLocaleString()}${pct} ${label}`,
+    cls: diff > 0 ? 'up' : 'down'
+  };
+}
+
+async function loadValueChart() {
+  if (!currentUser) return;
+  if (valueLoading) { valueDirty = true; return; }
+  valueLoading = true;
+  try {
+    if (!valueHistory) {
+      const snap = await getDocs(query(
+        collection(db, 'users', currentUser.uid, 'valueHistory'),
+        orderBy('day', 'desc'),
+        limit(400)
+      ));
+      valueHistory = snap.docs
+        .map(d => d.data())
+        .filter(x => typeof x.value === 'number' && typeof x.day === 'string')
+        .sort((a, b) => (a.day < b.day ? -1 : 1));
+    }
+    // Weekly change shown on the dashboard
+    const week = describeChange(buildChartPoints(valueHistory, '7D', Date.now()), 'this week');
+    weeklyTrendText = week.text;
+    const trendEl = document.getElementById('nwTrend');
+    if (trendEl && lastDashListings.length) {
+      trendEl.textContent = `${lastDashListings.length} item${lastDashListings.length !== 1 ? 's' : ''} in your stash${weeklyTrendText ? ' · ' + weeklyTrendText : ''}`;
+    }
+    renderValueChart();
+  } catch (e) {
+    console.error('Value history load failed', e);
+    const wrap = document.getElementById('valueChart');
+    if (wrap) wrap.innerHTML = `<div class="vt-empty">Couldn't load your value history. Try again in a moment.</div>`;
+  } finally {
+    valueLoading = false;
+    if (valueDirty) {
+      valueDirty = false;
+      valueHistory = null;
+      loadValueChart();
+    }
+  }
+}
+
+function setValueRange(range) {
+  valueRange = range;
+  document.querySelectorAll('#vtRanges .vt-range').forEach(b => b.classList.toggle('active', b.dataset.range === range));
+  renderValueChart();
+}
+
+function renderValueChart() {
+  const wrap = document.getElementById('valueChart');
+  if (!wrap) return;
+  if (!valueHistory) { wrap.innerHTML = `<div class="vt-empty">Loading...</div>`; return; }
+
+  const latest = valueHistory[valueHistory.length - 1];
+  setText('vtValue', 'SCR ' + Number(latest ? latest.value : 0).toLocaleString());
+
+  const pts = buildChartPoints(valueHistory, valueRange, Date.now());
+  const label = valueRange === '7D' ? 'in 7 days' : valueRange === '30D' ? 'in 30 days' : 'all time';
+  const change = describeChange(pts, label);
+  const deltaEl = document.getElementById('vtDelta');
+  if (deltaEl) {
+    deltaEl.textContent = change.text || '';
+    deltaEl.className = 'vt-delta ' + change.cls;
+  }
+
+  if (pts.length < 2) {
+    wrap.innerHTML = `<div class="vt-empty">Your chart starts today. Come back tomorrow to see how your stash value moves.</div>`;
+    return;
+  }
+
+  const W = Math.max(280, wrap.clientWidth || 600);
+  const H = 210;
+  const padL = 10, padR = 10, padT = 14, padB = 28;
+  const t0 = pts[0].t;
+  const t1 = pts[pts.length - 1].t;
+  const vals = pts.map(p => p.value);
+  let lo = Math.min(...vals);
+  let hi = Math.max(...vals);
+  const pad = hi === lo ? Math.max(1, hi * 0.05) : (hi - lo) * 0.12;
+  lo = Math.max(0, lo - pad);
+  hi = hi + pad;
+
+  const X = t => padL + (t1 === t0 ? 0 : (t - t0) / (t1 - t0)) * (W - padL - padR);
+  const Y = v => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
+  const xs = pts.map(p => X(p.t));
+
+  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${xs[i].toFixed(1)},${Y(p.value).toFixed(1)}`).join(' ');
+  const area = `${line} L${xs[xs.length - 1].toFixed(1)},${H - padB} L${xs[0].toFixed(1)},${H - padB} Z`;
+  const fmtDay = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+  const grid = [hi, (hi + lo) / 2, lo].map(v => `
+    <line x1="${padL}" x2="${W - padR}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="rgba(255,255,255,0.06)" />
+    <text x="${padL}" y="${(Y(v) - 4).toFixed(1)}" fill="rgba(255,255,255,0.35)" font-size="10" font-weight="600">${fmtCompact(v)}</text>`).join('');
+
+  const lastIdx = pts.length - 1;
+  wrap.innerHTML = `
+    <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;touch-action:pan-y;cursor:crosshair">
+      <defs>
+        <linearGradient id="vtGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#D4A017" stop-opacity="0.32" />
+          <stop offset="100%" stop-color="#D4A017" stop-opacity="0" />
+        </linearGradient>
+      </defs>
+      ${grid}
+      <path d="${area}" fill="url(#vtGrad)" />
+      <path d="${line}" fill="none" stroke="#D4A017" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" />
+      <text x="${padL}" y="${H - 8}" fill="rgba(255,255,255,0.4)" font-size="11" font-weight="600">${fmtDay(t0)}</text>
+      <text x="${W - padR}" y="${H - 8}" fill="rgba(255,255,255,0.4)" font-size="11" font-weight="600" text-anchor="end">${fmtDay(t1)}</text>
+      <circle cx="${xs[lastIdx].toFixed(1)}" cy="${Y(pts[lastIdx].value).toFixed(1)}" r="4.5" fill="#D4A017" stroke="#0B0B0C" stroke-width="2" />
+      <line id="vtGuide" y1="${padT}" y2="${H - padB}" stroke="rgba(212,160,23,0.5)" stroke-width="1" style="display:none" />
+      <circle id="vtDot" r="5" fill="#fff" stroke="#D4A017" stroke-width="2.5" style="display:none" />
+    </svg>
+    <div class="vt-tip" id="vtTip"></div>`;
+
+  const svg = wrap.querySelector('svg');
+  const tip = wrap.querySelector('#vtTip');
+  const guide = wrap.querySelector('#vtGuide');
+  const dot = wrap.querySelector('#vtDot');
+
+  const show = (e) => {
+    const rect = svg.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    let best = 0, bestD = Infinity;
+    xs.forEach((px, i) => {
+      const d = Math.abs(px - x);
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    const cx = xs[best];
+    const cy = Y(pts[best].value);
+    guide.setAttribute('x1', cx); guide.setAttribute('x2', cx); guide.style.display = '';
+    dot.setAttribute('cx', cx); dot.setAttribute('cy', cy); dot.style.display = '';
+    tip.innerHTML = `${fmtDay(pts[best].t)}<br><span style="color:var(--gold)">SCR ${Number(pts[best].value).toLocaleString()}</span>`;
+    tip.style.display = 'block';
+    tip.style.left = Math.min(Math.max(cx, 60), W - 60) + 'px';
+    tip.style.top = cy + 'px';
+  };
+  const hide = () => {
+    guide.style.display = 'none';
+    dot.style.display = 'none';
+    tip.style.display = 'none';
+  };
+  svg.addEventListener('pointermove', show);
+  svg.addEventListener('pointerdown', show);
+  svg.addEventListener('pointerleave', hide);
+}
+
+let vtResizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(vtResizeTimer);
+  vtResizeTimer = setTimeout(() => {
+    if (currentScreen === 'portfolio' && valueHistory) renderValueChart();
+  }, 150);
+});
 
 function normalizeWhatsApp(v) {
   v = (v || '').trim();
@@ -824,7 +1056,7 @@ function switchScreen(id) {
     if (id === 'hunts') loadHunts();
     if (id === 'leaderboard') loadLeaderboard();
     if (id === 'trades') loadTrades();
-    if (id === 'portfolio') loadPortfolioListings();
+    if (id === 'portfolio') { loadPortfolioListings(); loadValueChart(); }
   }, 220);
 
   document.querySelectorAll('.snav').forEach(n => n.classList.toggle('active', n.dataset.screen === id));
@@ -874,6 +1106,7 @@ function renderDashboard(listings) {
 
   // Portfolio value
   const total = listings.reduce((sum, l) => sum + (l.priceSCR || 0), 0);
+  recordValueSnapshot(total);
   const nwEl = document.getElementById('nwValue');
   if (nwEl) animateCount(nwEl, total);
 
@@ -881,7 +1114,7 @@ function renderDashboard(listings) {
   if (trendEl) {
     trendEl.textContent = listings.length === 0
       ? 'No items yet — list your first item!'
-      : `${listings.length} item${listings.length !== 1 ? 's' : ''} in your stash`;
+      : `${listings.length} item${listings.length !== 1 ? 's' : ''} in your stash${weeklyTrendText ? ' · ' + weeklyTrendText : ''}`;
     trendEl.style.color = 'var(--green)';
     trendEl.style.background = 'var(--green-bg)';
     trendEl.style.border = '1px solid var(--green-border)';
@@ -2131,6 +2364,7 @@ window.cancelProfileSetup = cancelProfileSetup;
 window.guestInquire = guestInquire;
 window.setPlatformFilter = setPlatformFilter;
 window.openHuntForm = openHuntForm;
+window.setValueRange = setValueRange;
 window.closeHuntForm = closeHuntForm;
 window.submitHunt = submitHunt;
 window.deleteHunt = deleteHunt;
