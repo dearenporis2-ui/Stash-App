@@ -72,11 +72,17 @@ let navBound = false;
 let pendingSheetListing = null;
 let marketUnsub = null;
 let openListingAfterProfile = false;
+let openHuntAfterProfile = false;
+let huntsUnsub = null;
+let hunts = [];
+let huntFilter = 'all';
+const HUNT_CATEGORIES = ['Watches', 'Sneakers', 'Tech', 'Jewelry', 'Cars', 'Bags', 'Games', 'Parts Bin', 'Other'];
 
 function cleanupListeners() {
   unsubscribeListeners.forEach(u => u());
   unsubscribeListeners = [];
   marketUnsub = null;
+  huntsUnsub = null;
 }
 
 onAuthStateChanged(auth, async (user) => {
@@ -179,6 +185,239 @@ async function migrateGameListings() {
   } catch (e) {
     console.error('Game migration failed', e);
   }
+}
+
+// ═══════════════════════════════════════════
+// GRAIL HUNTS (public bounties: what I'm hunting + target price)
+// Each person can have up to 5 hunts at once (doc ids are uid_1 … uid_5),
+// and a hunt expires after 30 days.
+// ═══════════════════════════════════════════
+function timeAgo(ms) {
+  if (!ms) return '';
+  const min = Math.floor((Date.now() - ms) / 60000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min}m ago`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function loadHunts() {
+  if (huntsUnsub) return;
+  const q = query(collection(db, 'hunts'), orderBy('createdAt', 'desc'), limit(100));
+  huntsUnsub = onSnapshot(q, (snap) => {
+    hunts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    renderHunts();
+    cleanupOwnExpiredHunts();
+  }, (err) => {
+    console.error('Hunts load failed', err);
+    huntsUnsub = null;
+    setText('huntCount', 'Could not load');
+  });
+  unsubscribeListeners.push(huntsUnsub);
+}
+
+// Frees slots: your own hunts that ran out are removed automatically
+function cleanupOwnExpiredHunts() {
+  if (!currentUser) return;
+  hunts
+    .filter(h => h.hunterId === currentUser.uid && h.expiresAt?.toMillis?.() <= Date.now())
+    .forEach(h => deleteDoc(doc(db, 'hunts', h.id)).catch(() => {}));
+}
+
+function huntActive(h) {
+  return (h.expiresAt?.toMillis?.() || 0) > Date.now();
+}
+
+function renderHunts() {
+  const grid = document.getElementById('huntGrid');
+  if (!grid) return;
+  const search = (document.getElementById('huntSearch')?.value || '').toLowerCase();
+
+  let list = hunts.filter(huntActive);
+  if (huntFilter !== 'all') list = list.filter(h => h.category === huntFilter);
+  if (search) {
+    list = list.filter(h =>
+      h.title?.toLowerCase().includes(search) ||
+      h.description?.toLowerCase().includes(search) ||
+      h.category?.toLowerCase().includes(search)
+    );
+  }
+  setText('huntCount', `${list.length} hunt${list.length !== 1 ? 's' : ''}`);
+
+  if (list.length === 0) {
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><div class="empty-icon">🎯</div><div class="empty-title">No Hunts Yet</div><div class="empty-sub">Looking for something specific? Post the first Grail Hunt and let sellers find you.</div></div>`;
+    return;
+  }
+
+  grid.innerHTML = list.map(h => {
+    const mine = currentUser && h.hunterId === currentUser.uid;
+    const daysLeft = Math.max(1, Math.ceil((h.expiresAt.toMillis() - Date.now()) / 86400000));
+    return `
+      <div class="hunt-card${mine ? ' mine' : ''}">
+        <div class="hunt-top">
+          <span class="hunt-cat">${getCategoryEmoji(h.category)} ${escHtml(h.category || 'Other')}</span>
+          <span class="hunt-age">${timeAgo(h.createdAt?.toMillis?.())}</span>
+        </div>
+        <div class="hunt-title">${escHtml(h.title)}</div>
+        ${h.description ? `<div class="hunt-desc">${escHtml(h.description)}</div>` : ''}
+        <div class="hunt-target"><span>TARGET PRICE</span><b>SCR ${Number(h.targetPriceSCR || 0).toLocaleString()}</b></div>
+        <div class="hunt-by">@${escHtml(h.hunterUsername || 'unknown')}${mine ? ' (you)' : ''} · ${daysLeft}d left</div>
+        ${mine
+          ? `<div class="hunt-actions">
+               <button class="modal-btn hunt-btn" onclick="deleteHunt('${h.id}', true)">🎉 Found it</button>
+               <button class="modal-btn-ghost hunt-btn" onclick="deleteHunt('${h.id}', false)">Delete</button>
+             </div>`
+          : `<button class="modal-btn hunt-btn" onclick="openHuntView('${h.id}')">I have this</button>`}
+      </div>`;
+  }).join('');
+}
+
+function filterHunts() { renderHunts(); }
+
+function setHuntFilter(el, value) {
+  el.closest('.filter-row').querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  huntFilter = value;
+  renderHunts();
+}
+
+function openHuntForm() {
+  if (!currentUser) return requireAuth('Sign up to post a hunt');
+  if (!currentUserData?.whatsapp && !currentUserData?.instagram) {
+    showToast('Add your WhatsApp or Instagram to your profile first so sellers can reach you.', 'info');
+    openHuntAfterProfile = true;
+    openEditProfile();
+    return;
+  }
+  ['huntTitle', 'huntPrice', 'huntDesc'].forEach(id => { document.getElementById(id).value = ''; });
+  document.getElementById('huntCategory').value = '';
+  document.getElementById('huntFormModal').classList.add('open');
+}
+
+function closeHuntForm() {
+  document.getElementById('huntFormModal').classList.remove('open');
+}
+
+async function submitHunt() {
+  if (!currentUser || !currentUserData) return;
+  const title = document.getElementById('huntTitle').value.trim();
+  const category = document.getElementById('huntCategory').value;
+  const price = parseFloat(document.getElementById('huntPrice').value);
+  const description = document.getElementById('huntDesc').value.trim();
+
+  if (title.length < 3) return showToast('Tell us what you are hunting (at least 3 characters)', 'error');
+  if (title.length > 100) return showToast('Title is too long (100 characters max)', 'error');
+  if (!HUNT_CATEGORIES.includes(category)) return showToast('Pick a category', 'error');
+  if (isNaN(price) || price <= 0) return showToast('Enter your target price', 'error');
+  if (description.length > 500) return showToast('Details are too long (500 characters max)', 'error');
+
+  const btn = document.getElementById('huntSubmitBtn');
+  if (btn) btn.disabled = true;
+  try {
+    // Find a free slot (max 5 hunts at once)
+    const mine = await getDocs(query(collection(db, 'hunts'), where('hunterId', '==', currentUser.uid)));
+    const used = new Set(mine.docs.map(d => d.id));
+    let slot = null;
+    for (let n = 1; n <= 5; n++) {
+      if (!used.has(`${currentUser.uid}_${n}`)) { slot = n; break; }
+    }
+    if (!slot) {
+      return showToast('You can have up to 5 active hunts. Mark one as found or delete it first.', 'error');
+    }
+
+    await setDoc(doc(db, 'hunts', `${currentUser.uid}_${slot}`), {
+      hunterId: currentUser.uid,
+      hunterUsername: currentUserData.username,
+      hunterDisplayName: (currentUserData.displayName || currentUserData.username).slice(0, 40),
+      title,
+      category,
+      description,
+      targetPriceSCR: price,
+      createdAt: serverTimestamp(),
+      expiresAt: Timestamp.fromMillis(Date.now() + 30 * 24 * 60 * 60 * 1000)
+    });
+    closeHuntForm();
+    showToast('🎯 Hunt posted! It stays up for 30 days.', 'success');
+  } catch (err) {
+    showToast('Could not post hunt: ' + err.message, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function deleteHunt(id, found) {
+  if (!currentUser) return;
+  if (!found && !confirm('Delete this hunt?')) return;
+  try {
+    await deleteDoc(doc(db, 'hunts', id));
+    showToast(found ? '🎉 Nice! Hunt closed.' : 'Hunt deleted', 'success');
+  } catch (err) {
+    showToast('Could not update hunt: ' + err.message, 'error');
+  }
+}
+
+async function openHuntView(id) {
+  const h = hunts.find(x => x.id === id);
+  if (!h) return;
+  setText('huntViewTitle', h.title);
+  document.getElementById('huntViewMeta').innerHTML =
+    `<span class="hunt-cat">${getCategoryEmoji(h.category)} ${escHtml(h.category || 'Other')}</span>`
+    + `<span class="hunt-view-price">Target: SCR ${Number(h.targetPriceSCR || 0).toLocaleString()}</span>`;
+  const desc = document.getElementById('huntViewDesc');
+  desc.textContent = h.description || '';
+  desc.style.display = h.description ? 'block' : 'none';
+  setText('huntViewBy', `Hunt posted by @${h.hunterUsername || 'unknown'}`);
+
+  const actions = document.getElementById('huntViewActions');
+  actions.innerHTML = '';
+  document.getElementById('huntViewModal').classList.add('open');
+
+  if (!currentUser) {
+    const btn = document.createElement('button');
+    btn.className = 'modal-btn';
+    btn.textContent = 'Sign up free to respond';
+    btn.onclick = () => { closeHuntView(); requireAuth('Sign up free to respond to hunts'); };
+    actions.appendChild(btn);
+    return;
+  }
+
+  let contact = {};
+  try {
+    const snap = await getDoc(doc(db, 'users', h.hunterId));
+    if (snap.exists()) contact = snap.data();
+  } catch (e) {
+    console.error('Hunter contact load failed', e);
+  }
+
+  const msg = `Hi! I saw your Grail Hunt for "${h.title}" on Stash. I think I have one. Interested?`;
+  const links = [];
+  const wa = (contact.whatsapp || '').replace(/[^0-9]/g, '');
+  if (wa) links.push({ text: 'WhatsApp the hunter', href: `https://wa.me/${wa}?text=${encodeURIComponent(msg)}` });
+  const ig = (contact.instagram || '').replace('@', '').trim();
+  if (ig) links.push({ text: 'Message on Instagram', href: `https://instagram.com/${encodeURIComponent(ig)}` });
+
+  if (!links.length) {
+    const note = document.createElement('div');
+    note.style.cssText = 'font-size:13px;color:var(--text-muted);text-align:center;padding:10px';
+    note.textContent = "This hunter hasn't added contact info yet.";
+    actions.appendChild(note);
+    return;
+  }
+  links.forEach(l => {
+    const a = document.createElement('a');
+    a.className = 'modal-btn';
+    a.style.cssText = 'display:block;text-align:center;text-decoration:none;margin-bottom:10px';
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.href = l.href;
+    a.textContent = l.text;
+    actions.appendChild(a);
+  });
+}
+
+function closeHuntView() {
+  document.getElementById('huntViewModal').classList.remove('open');
 }
 
 function normalizeWhatsApp(v) {
@@ -546,6 +785,7 @@ function playNotificationSound(type = 'info') {
 const topbarTitles = {
   dashboard: 'My Stash',
   marketplace: 'Marketplace',
+  hunts: '🎯 Grail Hunts',
   shop: '✦ Exotic Shop',
   leaderboard: '🏆 Leaderboard',
   portfolio: 'Public Profile',
@@ -556,8 +796,8 @@ const topbarTitles = {
 function switchScreen(id) {
   if (id === currentScreen) return;
 
-  // Guests can only browse the marketplace
-  if (!currentUser && id !== 'marketplace') {
+  // Guests can only browse the marketplace and the hunts board
+  if (!currentUser && id !== 'marketplace' && id !== 'hunts') {
     requireAuth('Sign up to see this. It only takes a moment.');
     return;
   }
@@ -581,6 +821,7 @@ function switchScreen(id) {
 
     // Lazy load screen data
     if (id === 'marketplace') loadMarketplace();
+    if (id === 'hunts') loadHunts();
     if (id === 'leaderboard') loadLeaderboard();
     if (id === 'trades') loadTrades();
     if (id === 'portfolio') loadPortfolioListings();
@@ -1751,6 +1992,7 @@ function openEditProfile() {
 
 function closeEditProfile() {
   openListingAfterProfile = false;
+  openHuntAfterProfile = false;
   document.getElementById('editProfileModal').classList.remove('open');
 }
 
@@ -1775,6 +2017,7 @@ async function saveProfile() {
   if (instagram === null) return showToast('That Instagram handle looks invalid', 'error');
 
   const reopenListing = openListingAfterProfile;
+  const reopenHunt = openHuntAfterProfile;
   try {
     await updateDoc(doc(db, 'users', currentUser.uid), {
       displayName,
@@ -1789,6 +2032,11 @@ async function saveProfile() {
       openListingAfterProfile = false;
       currentUserData = { ...currentUserData, whatsapp, instagram };
       openListingModal();
+    }
+    if (reopenHunt && (whatsapp || instagram)) {
+      openHuntAfterProfile = false;
+      currentUserData = { ...currentUserData, whatsapp, instagram };
+      openHuntForm();
     }
   } catch (err) {
     showToast('Error saving profile: ' + err.message, 'error');
@@ -1882,6 +2130,14 @@ window.completeProfileSetup = completeProfileSetup;
 window.cancelProfileSetup = cancelProfileSetup;
 window.guestInquire = guestInquire;
 window.setPlatformFilter = setPlatformFilter;
+window.openHuntForm = openHuntForm;
+window.closeHuntForm = closeHuntForm;
+window.submitHunt = submitHunt;
+window.deleteHunt = deleteHunt;
+window.openHuntView = openHuntView;
+window.closeHuntView = closeHuntView;
+window.setHuntFilter = setHuntFilter;
+window.filterHunts = filterHunts;
 window.handleRegister = handleRegister;
 window.handleLogout = handleLogout;
 window.showLogin = showLogin;

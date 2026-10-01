@@ -125,6 +125,40 @@ service cloud.firestore {
         && resource.data.sellerId == request.auth.uid;
     }
 
+    // ─── Grail Hunts: public bounties ───
+    // Doc id is <uid>_1 … <uid>_5, so nobody can have more than 5 at once.
+    match /hunts/{huntId} {
+      allow read: if true;
+
+      allow create: if signedIn()
+        && huntId.matches(request.auth.uid + '_[1-5]')
+        && request.resource.data.keys().hasOnly([
+             'hunterId', 'hunterUsername', 'hunterDisplayName', 'title', 'category',
+             'description', 'targetPriceSCR', 'createdAt', 'expiresAt'
+           ])
+        && request.resource.data.hunterId == request.auth.uid
+        && request.resource.data.hunterUsername == userDoc(request.auth.uid).username
+        && request.resource.data.hunterDisplayName is string
+        && request.resource.data.hunterDisplayName.size() <= 40
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 3
+        && request.resource.data.title.size() <= 100
+        && request.resource.data.category in
+             ['Watches', 'Sneakers', 'Tech', 'Jewelry', 'Cars', 'Bags', 'Games', 'Parts Bin', 'Other']
+        && request.resource.data.get('description', '') is string
+        && request.resource.data.get('description', '').size() <= 500
+        && request.resource.data.targetPriceSCR is number
+        && request.resource.data.targetPriceSCR > 0
+        && request.resource.data.targetPriceSCR < 10000000
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.expiresAt is timestamp
+        && request.resource.data.expiresAt > request.time + duration.value(25, 'd')
+        && request.resource.data.expiresAt <= request.time + duration.value(35, 'd');
+
+      allow update: if false;
+      allow delete: if signedIn() && resource.data.hunterId == request.auth.uid;
+    }
+
     // ─── Handshakes: created by the seller, holds the secret QR token ───
     // Only the seller can read it, so the token never reaches anyone else.
     match /handshakes/{hid} {
