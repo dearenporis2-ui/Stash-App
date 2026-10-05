@@ -37,30 +37,119 @@ let unsubscribeListeners = [];
 // ═══════════════════════════════════════════
 // LOADING SCREEN
 // ═══════════════════════════════════════════
-const LOADING_SCREEN_MIN_MS = 1800;
+const LOADING_SCREEN_MIN_MS = 1800;          // classic loader
+const ELECTRIC_LOADING_MIN_MS = 2400;        // electric logo needs a moment to form
 const loadingScreenStartTime = Date.now();
+
+// Electric logo loader (WebGL2). Falls back to the classic text loader if anything is unavailable.
+const ELECTRIC_LOGO_OPTIONS = {
+  color: '#fff3cc',        // bright core of the arcs
+  glowColor: '#D4A017',    // Stash gold
+  scale: 0.74,
+  intensity: 1.1,
+  glow: 1,
+  thickness: 1.5,
+  strands: 4,
+  bend: 0.6,
+  crackle: 1.5,
+  arcs: 1,
+  flicker: 0.6,
+  fill: 0.55,              // gold tint inside the letters (0 = outline only)
+  speed: 2.5,
+  interactive: true,
+  cursorIntensity: 0.75,
+  cursorRadius: 100
+};
+let electricLogo = null;
+let electricFailed = false;
+let loadingHidden = false;
+const electricWanted = (() => {
+  try {
+    const probe = document.createElement('canvas');
+    const gl = probe.getContext('webgl2');
+    if (!gl) return false;
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 function hideLoadingScreen() {
   const screen = document.getElementById('loadingScreen');
   if (!screen) return;
   const elapsed = Date.now() - loadingScreenStartTime;
-  const remaining = Math.max(0, LOADING_SCREEN_MIN_MS - elapsed);
+  const minMs = electricWanted && !electricFailed ? ELECTRIC_LOADING_MIN_MS : LOADING_SCREEN_MIN_MS;
+  const remaining = Math.max(0, minMs - elapsed);
 
   setTimeout(() => {
     screen.style.opacity = '0';
     screen.style.transform = 'scale(1.02)';
     screen.style.pointerEvents = 'none';
-    setTimeout(() => { screen.style.display = 'none'; }, 600);
+    setTimeout(() => {
+      screen.style.display = 'none';
+      loadingHidden = true;
+      if (electricLogo) { electricLogo.destroy(); electricLogo = null; }   // frees the WebGL context
+    }, 600);
   }, remaining);
 }
 
-function showLoadingAnimation() {
+function revealClassicLogo() {
   const logo = document.getElementById('loadingLogo');
+  if (logo) { logo.style.opacity = '1'; logo.style.transform = 'translateY(0)'; }
+}
+
+function showLoadingAnimation() {
   const tagline = document.getElementById('loadingTagline');
   const bar = document.getElementById('loadingBar');
-  if (logo) { logo.style.opacity = '1'; logo.style.transform = 'translateY(0)'; }
+  if (!electricWanted) revealClassicLogo();   // with the electric logo, the text appears only if it fails
   if (tagline) { tagline.style.opacity = '1'; }
   if (bar) { setTimeout(() => { bar.style.width = '100%'; }, 100); }
+}
+
+// The STASH wordmark, drawn on a canvas so the effect can trace its outline
+function drawWordmarkCanvas() {
+  const size = 220;
+  const cv = document.createElement('canvas');
+  cv.width = 1100;
+  cv.height = 340;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = `900 ${size}px Inter, "Helvetica Neue", Arial, sans-serif`;
+  if ('letterSpacing' in ctx) ctx.letterSpacing = `${-0.04 * size}px`;
+  ctx.fillText('STASH', 30, 260);
+  return cv;
+}
+
+async function initElectricLoading() {
+  const host = document.getElementById('electricLogoHost');
+  if (!host || !electricWanted) return;
+  const timeout = ms => new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms));
+  const giveUp = () => {
+    electricFailed = true;
+    host.style.display = 'none';
+    revealClassicLogo();
+  };
+  try {
+    const mod = await Promise.race([import('./electric-logo.js'), timeout(4000)]);
+    try { await Promise.race([document.fonts.load('900 200px Inter'), timeout(1200)]); } catch (e) { /* font fallback is fine */ }
+    if (loadingHidden) return;
+
+    host.style.display = 'block';
+    const logo = mod.createElectricLogo(host, { ...ELECTRIC_LOGO_OPTIONS, source: drawWordmarkCanvas() });
+    const ok = await Promise.race([logo.ready, timeout(4000).catch(() => false)]);
+    if (!ok) {
+      logo.destroy();
+      return giveUp();
+    }
+    if (loadingHidden) { logo.destroy(); return; }
+    electricLogo = logo;
+    host.style.opacity = '1';
+  } catch (e) {
+    console.warn('Electric logo unavailable, using the classic loader', e);
+    giveUp();
+  }
 }
 
 // ═══════════════════════════════════════════
@@ -688,6 +777,7 @@ function closeAuth() {
 
 // Start the loading animation immediately
 showLoadingAnimation();
+initElectricLoading();
 
 // Safety fallback — never let the loading screen hang forever
 setTimeout(() => {
